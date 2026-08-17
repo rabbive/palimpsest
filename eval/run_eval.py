@@ -48,7 +48,7 @@ async def setup_arm_b(dialogue_id: str) -> None:
     if not memories:
         return
     await hydra.ingest_facts(collection=dialogue_id, memories=memories, database=ARM_B_DATABASE, upsert=True)
-    await hydra.wait_for_indexed([m["id"] for m in memories], database=ARM_B_DATABASE)
+    await hydra.wait_for_indexed([m["id"] for m in memories], collection=dialogue_id, database=ARM_B_DATABASE)
 
 
 async def run_arm_b(dialogue_id: str, question: str, model: str = config.STRONG_MODEL) -> str:

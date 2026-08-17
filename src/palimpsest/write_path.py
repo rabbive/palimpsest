@@ -87,7 +87,11 @@ async def process_dialogue(dialogue_id: str, sessions: list[tuple[int, str, str]
 
     if new_memories:
         await hydra.ingest_facts(collection=dialogue_id, memories=new_memories, graph_payload=graph_payload)
-        await hydra.wait_for_indexed([m["id"] for m in new_memories])
+        await hydra.wait_for_indexed([m["id"] for m in new_memories], collection=dialogue_id)
+        # ingest() cannot set schema-declared metadata per memory -- every new
+        # fact starts with `status` unset, which metadata_filters={"status":
+        # "current"} treats as a non-match, not a default. Must flip explicitly.
+        await asyncio.gather(*[hydra.flip_to_current(m["id"], collection=dialogue_id) for m in new_memories])
 
     for fact_id, collection in to_flip:
         await hydra.flip_to_historical(fact_id, collection=collection)

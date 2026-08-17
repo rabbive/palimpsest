@@ -77,20 +77,38 @@ async def ingest_facts(
     return await client.context.ingest(**kwargs)
 
 
+TERMINAL_SUCCESS = ("indexed", "completed", "success", "ready", "graph_creation")
+TERMINAL_FAILURE = ("errored", "failed")
+
+
 @_retry()
-async def wait_for_indexed(ids: list[str], database: str = config.HYDRADB_DATABASE, poll_seconds: float = 2.0, timeout_seconds: float = 120.0):
+async def wait_for_indexed(
+    ids: list[str],
+    collection: str,
+    database: str = config.HYDRADB_DATABASE,
+    poll_seconds: float = 2.0,
+    timeout_seconds: float = 120.0,
+):
+    """collection MUST match the collection used at ingest time or the status
+    poll returns FILE_NOT_FOUND for every id (a scope mismatch, not a missing file)."""
     client = _client()
     elapsed = 0.0
     remaining = set(ids)
+    failures: dict[str, str] = {}
     while remaining and elapsed < timeout_seconds:
-        resp = await client.context.status(database=database, ids=list(remaining))
+        resp = await client.context.status(database=database, collection=collection, ids=list(remaining))
         for s in resp.data.statuses:
-            if s.indexing_status in ("indexed", "completed", "success", "ready"):
+            if s.indexing_status in TERMINAL_SUCCESS:
                 remaining.discard(s.id)
+            elif s.indexing_status in TERMINAL_FAILURE:
+                remaining.discard(s.id)
+                failures[s.id] = f"{s.error_code}: {s.error_message}"
         if not remaining:
-            return
+            break
         await asyncio.sleep(poll_seconds)
         elapsed += poll_seconds
+    if failures:
+        raise RuntimeError(f"{len(failures)} memories failed indexing: {failures}")
     if remaining:
         raise TimeoutError(f"{len(remaining)} memories not indexed after {timeout_seconds}s: {remaining}")
 
@@ -143,14 +161,32 @@ async def relations(collection: str, database: str = config.HYDRADB_DATABASE, id
 
 
 @_retry()
-async def flip_to_historical(fact_id: str, collection: str, database: str = config.HYDRADB_DATABASE):
+async def set_status(fact_id: str, collection: str, status: str, database: str = config.HYDRADB_DATABASE):
+    """Set the schema-declared `status` field on one source.
+
+    Gotcha: context.ingest() has no field to set schema-declared metadata per
+    memory. A freshly-ingested fact's `status` is unset, and
+    metadata_filters={"status": "current"} excludes unset rows (it is not a
+    default value, it's a hard match). So every NEW fact needs this call with
+    status="current" right after ingest, not just superseded facts flipped to
+    "historical" -- otherwise the "current" view silently loses every fact that
+    was never superseded.
+    """
     client = _client()
     return await client.context.update_source_metadata(
         fact_id,
         database=database,
         collection=collection,
-        tenant_metadata={"status": "historical"},
+        tenant_metadata={"status": status},
     )
+
+
+async def flip_to_historical(fact_id: str, collection: str, database: str = config.HYDRADB_DATABASE):
+    return await set_status(fact_id, collection, "historical", database=database)
+
+
+async def flip_to_current(fact_id: str, collection: str, database: str = config.HYDRADB_DATABASE):
+    return await set_status(fact_id, collection, "current", database=database)
 
 
 @_retry()

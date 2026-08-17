@@ -17,14 +17,19 @@ app = typer.Typer(help="PALIMPSEST — write-time reconciliation and abstention 
 
 @app.command()
 def spike():
-    """§4.4 ingestion spike: create throwaway DB, ingest 10 memories, time it, confirm graph + BYOG."""
+    """§4.4 ingestion spike + §14 Day-0 risk check: create throwaway DB, ingest 10
+    memories, time it, confirm graph + BYOG, and confirm status filtering actually
+    filters (the Day 1 exit gate)."""
     import json
     import time
 
     async def _run():
         db = "palimpsest_spike"
         rprint(f"[bold]Creating database[/bold] {db}")
-        await hydra.create_database(database=db)
+        try:
+            await hydra.create_database(database=db)
+        except Exception as e:
+            rprint(f"[yellow]create_database: {e} (continuing, database may already exist)[/yellow]")
         await hydra.wait_for_database(database=db)
         rprint("[green]database ready[/green]")
 
@@ -37,17 +42,36 @@ def spike():
         }
 
         t0 = time.time()
-        resp = await hydra.ingest_facts(collection="spike", memories=memories, graph_payload=graph_payload, database=db)
+        await hydra.ingest_facts(collection="spike", memories=memories, graph_payload=graph_payload, database=db)
         t1 = time.time()
         rprint(f"[bold]ingest call[/bold]: {t1 - t0:.2f}s for 10 memories ({(t1 - t0) / 10:.2f}s/memory)")
 
-        await hydra.wait_for_indexed([m["id"] for m in memories], database=db)
+        await hydra.wait_for_indexed([m["id"] for m in memories], collection="spike", database=db)
         t2 = time.time()
         rprint(f"[bold]indexed after[/bold]: {t2 - t1:.2f}s")
 
         result = await hydra.query(q="test topic", collection="spike", database=db, graph_context=True)
         rprint("[bold]graph_context present:[/bold]", bool(result.data.graph_context))
-        rprint(json.dumps(result.data.model_dump(), indent=2, default=str)[:2000])
+        rprint(f"[bold]chunks returned:[/bold] {len(result.data.chunks or [])}")
+
+        # §14 risk check: does metadata_filters={"status": "current"} actually filter?
+        rprint("\n[bold]status-filter check[/bold] (Day 1 exit gate)")
+        coll = "status_check"
+        sf_memories = [
+            {"id": "sf_old", "text": "The users manager is Marcus Webb.", "infer": False},
+            {"id": "sf_new", "text": "The users manager is Priya Raghavan.", "infer": False},
+        ]
+        await hydra.ingest_facts(collection=coll, memories=sf_memories, database=db)
+        await hydra.wait_for_indexed(["sf_old", "sf_new"], collection=coll, database=db)
+        # ingest() cannot set schema-declared metadata per memory -- must flip explicitly.
+        await hydra.flip_to_current("sf_new", collection=coll, database=db)
+        await hydra.flip_to_historical("sf_old", collection=coll, database=db)
+
+        filtered = await hydra.query(q="who is the users manager", collection=coll, database=db, metadata_filters={"status": "current"})
+        ids = [c.id for c in (filtered.data.chunks or [])]
+        ok = ids == ["sf_new"]
+        color = "green" if ok else "red"
+        rprint(f"[{color}]status=current returned {ids} (expect only ['sf_new']): {'PASS' if ok else 'FAIL'}[/{color}]")
 
     asyncio.run(_run())
 
