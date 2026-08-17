@@ -12,10 +12,10 @@ HYDRADB_DATABASE = os.environ.get("HYDRADB_DATABASE", "palimpsest")
 
 # litellm-compatible OpenAI provider, pointed at a custom base URL (pincc.ai proxy).
 LLM_API_KEY = os.environ.get("LLM_API_KEY", "")
-LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://v2.pincc.ai")
+LLM_API_BASE = os.environ.get("LLM_API_BASE", "https://v2.pincc.ai/v1")
 
-CHEAP_MODEL = os.environ.get("PALIMPSEST_CHEAP_MODEL", "gpt-4.1-mini")
-STRONG_MODEL = os.environ.get("PALIMPSEST_STRONG_MODEL", "gpt-4.1")
+CHEAP_MODEL = os.environ.get("PALIMPSEST_CHEAP_MODEL", "gpt-5.4-mini")
+STRONG_MODEL = os.environ.get("PALIMPSEST_STRONG_MODEL", "gpt-5.5")
 
 EMBEDDINGS_DIMENSION = 1536
 
