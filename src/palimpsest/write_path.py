@@ -56,6 +56,13 @@ async def process_dialogue(dialogue_id: str, sessions: list[tuple[int, str, str]
     to_flip: list[tuple[str, str]] = []  # (fact_id, collection)
     stats = {"NEW": 0, "DUPLICATE": 0, "REFINEMENT": 0, "SUPERSESSION": 0, "CONTRADICTION": 0}
 
+    # The ledger write and the HydraDB write must succeed or fail together: if
+    # the `with` block below exits normally it auto-commits (see ledger.connect),
+    # so any HydraDB call that can fail (ingest, indexing, status flips) has to
+    # run *inside* this block. Otherwise a failed ingest still leaves committed
+    # ledger rows for facts HydraDB never received (hit this exact bug on
+    # dialogue 7 -- a too-large batch tripped HydraDB's 413 token budget after
+    # the ledger had already committed).
     with connect() as conn:
         for session_idx, session_ts, session_text in sessions:
             candidates = extract_session_facts(dialogue_id, session_idx, session_text, session_ts, model=model)
@@ -85,16 +92,16 @@ async def process_dialogue(dialogue_id: str, sessions: list[tuple[int, str, str]
                     _byog_payload(fact, prior, EDGE_FOR_LABEL.get(decision.label))
                 )
 
-    if new_memories:
-        await hydra.ingest_facts(collection=dialogue_id, memories=new_memories, graph_payload=graph_payload)
-        await hydra.wait_for_indexed([m["id"] for m in new_memories], collection=dialogue_id)
-        # ingest() cannot set schema-declared metadata per memory -- every new
-        # fact starts with `status` unset, which metadata_filters={"status":
-        # "current"} treats as a non-match, not a default. Must flip explicitly.
-        await asyncio.gather(*[hydra.flip_to_current(m["id"], collection=dialogue_id) for m in new_memories])
+        if new_memories:
+            await hydra.ingest_facts_batched(collection=dialogue_id, memories=new_memories, graph_payload=graph_payload)
+            await hydra.wait_for_indexed([m["id"] for m in new_memories], collection=dialogue_id)
+            # ingest() cannot set schema-declared metadata per memory -- every new
+            # fact starts with `status` unset, which metadata_filters={"status":
+            # "current"} treats as a non-match, not a default. Must flip explicitly.
+            await asyncio.gather(*[hydra.flip_to_current(m["id"], collection=dialogue_id) for m in new_memories])
 
-    for fact_id, collection in to_flip:
-        await hydra.flip_to_historical(fact_id, collection=collection)
+        for fact_id, collection in to_flip:
+            await hydra.flip_to_historical(fact_id, collection=collection)
 
     return stats
 

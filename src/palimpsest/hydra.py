@@ -3,7 +3,7 @@
 import asyncio
 import json
 
-from hydra_db import AsyncHydraDB, TenantsCustomPropertyDefinition
+from hydra_db import AsyncHydraDB, ContentTooLargeError, TenantsCustomPropertyDefinition
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from palimpsest import config
@@ -75,6 +75,55 @@ async def ingest_facts(
     if graph_payload:
         kwargs["graph_payload"] = json.dumps(graph_payload)
     return await client.context.ingest(**kwargs)
+
+
+def _sub_payload(graph_payload: dict | None, ids: set) -> dict | None:
+    if not graph_payload:
+        return None
+    sub = {k: v for k, v in graph_payload.items() if k in ids}
+    return sub or None
+
+
+async def _ingest_with_split(
+    collection: str,
+    memories: list[dict],
+    graph_payload: dict | None,
+    database: str,
+    upsert: bool,
+) -> list:
+    """Ingest, halving the batch on HydraDB's 413 per-request token budget error
+    (observed: 'combined cost N exceeds the per-request per_sec budget of 1000')."""
+    try:
+        resp = await ingest_facts(collection=collection, memories=memories, graph_payload=graph_payload, database=database, upsert=upsert)
+        return [resp]
+    except ContentTooLargeError:
+        if len(memories) <= 1:
+            raise
+        mid = len(memories) // 2
+        left, right = memories[:mid], memories[mid:]
+        left_payload = _sub_payload(graph_payload, {m["id"] for m in left})
+        right_payload = _sub_payload(graph_payload, {m["id"] for m in right})
+        left_results = await _ingest_with_split(collection, left, left_payload, database, upsert)
+        right_results = await _ingest_with_split(collection, right, right_payload, database, upsert)
+        return left_results + right_results
+
+
+async def ingest_facts_batched(
+    collection: str,
+    memories: list[dict],
+    graph_payload: dict | None = None,
+    database: str = config.HYDRADB_DATABASE,
+    upsert: bool = True,
+    batch_size: int = 15,
+) -> list:
+    """Batch-ingest, adaptively splitting any batch that trips the per-request
+    token budget. Returns the list of ingest responses (one per HydraDB call)."""
+    responses = []
+    for i in range(0, len(memories), batch_size):
+        chunk = memories[i : i + batch_size]
+        chunk_payload = _sub_payload(graph_payload, {m["id"] for m in chunk})
+        responses.extend(await _ingest_with_split(collection, chunk, chunk_payload, database, upsert))
+    return responses
 
 
 TERMINAL_SUCCESS = ("indexed", "completed", "success", "ready", "graph_creation")
