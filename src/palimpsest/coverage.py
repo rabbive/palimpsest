@@ -22,10 +22,21 @@ return {"slots": []}.
 """
 
 
+def _normalize_entity(entity: str) -> str:
+    normalized = entity.strip().lower()
+    if normalized in {"i", "me", "my", "myself", "the user"}:
+        return "user"
+    return normalized
+
+
 def decompose_question(question: str, model: str = config.CHEAP_MODEL) -> list[dict]:
     data = llm.complete_json(prompt=f"QUESTION: {question}", system=DECOMPOSE_SYSTEM, model=model)
     slots = data.get("slots", []) if isinstance(data, dict) else []
-    return [s for s in slots if s.get("entity") and s.get("predicate")]
+    return [
+        {"entity": _normalize_entity(str(slot["entity"])), "predicate": slot["predicate"]}
+        for slot in slots
+        if slot.get("entity") and slot.get("predicate")
+    ]
 
 
 async def slot_has_coverage(dialogue_id: str, entity: str, predicate: str) -> tuple[bool, list[str]]:

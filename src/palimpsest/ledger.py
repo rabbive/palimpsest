@@ -29,6 +29,17 @@ CREATE TABLE IF NOT EXISTS facts (
 );
 CREATE INDEX IF NOT EXISTS idx_facts_slot ON facts (dialogue_id, subject, predicate);
 CREATE INDEX IF NOT EXISTS idx_facts_status ON facts (dialogue_id, status);
+CREATE TABLE IF NOT EXISTS hydra_pending (
+    fact_id TEXT PRIMARY KEY,
+    dialogue_id TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hydra_pending_dialogue ON hydra_pending (dialogue_id);
+CREATE TABLE IF NOT EXISTS hydra_source_aliases (
+    fact_id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL UNIQUE
+);
 """
 
 
@@ -64,6 +75,58 @@ def mark_historical(conn: sqlite3.Connection, fact_id: str, superseded_by: str) 
         "UPDATE facts SET status = 'historical', superseded_by = ? WHERE id = ?",
         (superseded_by, fact_id),
     )
+
+
+def fact_exists(conn: sqlite3.Connection, fact_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM facts WHERE id = ? LIMIT 1", (fact_id,)).fetchone() is not None
+
+
+def set_source_aliases(conn: sqlite3.Connection, aliases: dict[str, str]) -> None:
+    if aliases:
+        conn.executemany(
+            "INSERT OR REPLACE INTO hydra_source_aliases (fact_id, source_id) VALUES (?, ?)",
+            aliases.items(),
+        )
+
+
+def source_ids(conn: sqlite3.Connection, fact_ids: list[str]) -> dict[str, str]:
+    if not fact_ids:
+        return {}
+    placeholders = ",".join("?" for _ in fact_ids)
+    rows = conn.execute(
+        f"SELECT fact_id, source_id FROM hydra_source_aliases WHERE fact_id IN ({placeholders})",
+        fact_ids,
+    ).fetchall()
+    aliases = {row[0]: row[1] for row in rows}
+    return {fact_id: aliases.get(fact_id, fact_id) for fact_id in fact_ids}
+
+
+def record_pending(conn: sqlite3.Connection, fact_ids: list[str], dialogue_id: str) -> None:
+    conn.executemany(
+        "INSERT OR IGNORE INTO hydra_pending (fact_id, dialogue_id) VALUES (?, ?)",
+        [(fact_id, dialogue_id) for fact_id in fact_ids],
+    )
+
+
+def pending_ids(conn: sqlite3.Connection, dialogue_id: str) -> list[str]:
+    rows = conn.execute(
+        "SELECT fact_id FROM hydra_pending WHERE dialogue_id = ? ORDER BY fact_id",
+        (dialogue_id,),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
+def clear_pending(conn: sqlite3.Connection, fact_ids: list[str]) -> None:
+    if fact_ids:
+        conn.executemany("DELETE FROM hydra_pending WHERE fact_id = ?", [(fact_id,) for fact_id in fact_ids])
+
+
+def bump_pending_attempts(conn: sqlite3.Connection, fact_ids: list[str], error: str = "") -> None:
+    if fact_ids:
+        conn.executemany(
+            "UPDATE hydra_pending SET attempts = attempts + 1, last_error = ? WHERE fact_id = ?",
+            [(error, fact_id) for fact_id in fact_ids],
+        )
 
 
 def facts_for_slot(conn: sqlite3.Connection, dialogue_id: str, subject: str, predicate: str, status: str | None = "current") -> list[Fact]:

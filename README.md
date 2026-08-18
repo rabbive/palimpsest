@@ -94,6 +94,10 @@ make report              # results/*.md
 - No traversal query language in HydraDB means chain-walking and the inspector UI
   read from a local SQLite mirror, not the store itself — stated plainly rather than
   hidden, per the project's own thesis about honest division of labour.
+- HydraDB can leave individual asynchronous ingestion sources queued even after the
+  request is accepted. The write path uses small batches, bounded polling, retries
+  only for queued IDs, and a SQLite `hydra_pending` outbox; persistent stragglers are
+  not marked current until indexing completes.
 - Closed predicate vocabulary (`src/palimpsest/vocab.py`) was derived from a skim of
   two BEAM-100K dialogues; it may miss predicates that appear in dialogues outside
   the frozen subset, which would fall through to `OTHER` and reduce slot-matching

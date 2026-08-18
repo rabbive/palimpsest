@@ -5,7 +5,7 @@ Every answer path goes through hydra.query(). We never answer from SQLite.
 
 from palimpsest import config, hydra, llm
 from palimpsest.coverage import check_premise
-from palimpsest.models import Answer
+from palimpsest.models import Abstention, Answer
 
 INTENT_SYSTEM = """Classify the QUESTION into exactly one intent:
 - CURRENT: asks what is true now / currently.

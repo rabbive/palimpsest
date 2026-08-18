@@ -12,14 +12,18 @@ RETRYABLE = retry_if_exception_type(Exception)
 
 
 def _client() -> AsyncHydraDB:
-    return AsyncHydraDB(token=config.HYDRADB_API_KEY, api_version="2", timeout=60.0)
+    return AsyncHydraDB(
+        token=config.HYDRADB_API_KEY,
+        api_version="2",
+        timeout=config.HYDRA_REQUEST_TIMEOUT_SECONDS,
+    )
 
 
 def _retry():
     return retry(
         retry=RETRYABLE,
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=1, min=1, max=20),
         reraise=True,
     )
 
@@ -126,26 +130,125 @@ async def ingest_facts_batched(
     return responses
 
 
-TERMINAL_SUCCESS = ("indexed", "completed", "success", "ready", "graph_creation")
+async def ingest_facts_with_backpressure(
+    collection: str,
+    memories: list[dict],
+    graph_payload: dict | None = None,
+    database: str = config.HYDRADB_DATABASE,
+    upsert: bool = True,
+    batch_size: int = config.HYDRA_BATCH_SIZE,
+    batch_timeout_seconds: float = config.HYDRA_BATCH_TIMEOUT_SECONDS,
+    queue_retries: int = config.HYDRA_QUEUE_RETRIES,
+    retry_backoff_seconds: float = config.HYDRA_QUEUE_RETRY_BACKOFF_SECONDS,
+) -> set[str]:
+    """Ingest with bounded queue pressure and retry only queued sources.
+
+    HydraDB accepts ingestion asynchronously. Sending an entire dialogue and then
+    waiting for every source can leave a subset permanently queued while siblings
+    finish. This helper waits after each small batch, re-upserts only the sources
+    still queued, and returns persistent stragglers so callers can checkpoint them
+    instead of losing the whole dialogue.
+    """
+    pending: set[str] = set()
+
+    # First pass: keep only a small number of sources in flight and move on
+    # after the batch timeout. A queued batch must not block all later batches.
+    for i in range(0, len(memories), batch_size):
+        chunk = memories[i : i + batch_size]
+        ids = {memory["id"] for memory in chunk}
+        payload = _sub_payload(graph_payload, ids)
+        try:
+            await asyncio.wait_for(
+                _ingest_with_split(collection, chunk, payload, database, upsert),
+                timeout=config.HYDRA_REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            pending.update(ids)
+            continue
+        pending.update(
+            await wait_for_indexed(
+                list(ids),
+                collection=collection,
+                database=database,
+                max_stragglers=len(ids),
+                timeout_seconds=batch_timeout_seconds,
+            )
+        )
+
+    # Retry only the IDs that remained queued, in the same bounded batch size.
+    # Re-upserting completed IDs is unnecessary and can add queue pressure.
+    for attempt in range(queue_retries):
+        if not pending:
+            break
+        await asyncio.sleep(retry_backoff_seconds * (2**attempt))
+        next_pending: set[str] = set()
+        pending_memories = [memory for memory in memories if memory["id"] in pending]
+        for i in range(0, len(pending_memories), batch_size):
+            chunk = pending_memories[i : i + batch_size]
+            ids = {memory["id"] for memory in chunk}
+            payload = _sub_payload(graph_payload, ids)
+            try:
+                await asyncio.wait_for(
+                    _ingest_with_split(collection, chunk, payload, database, upsert),
+                    timeout=config.HYDRA_REQUEST_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                next_pending.update(ids)
+                continue
+            next_pending.update(
+                await wait_for_indexed(
+                    list(ids),
+                    collection=collection,
+                    database=database,
+                    max_stragglers=len(ids),
+                    timeout_seconds=batch_timeout_seconds,
+                )
+            )
+        pending = next_pending
+
+    return pending
+
+
+# `graph_creation` is an in-progress stage, not terminal. A diagnostic source
+# transitioned graph_creation -> completed a few seconds later; treating it as
+# success can race metadata updates and reads against unfinished graph work.
+TERMINAL_SUCCESS = ("indexed", "completed", "success", "ready")
 TERMINAL_FAILURE = ("errored", "failed")
 
 
-@_retry()
 async def wait_for_indexed(
     ids: list[str],
     collection: str,
     database: str = config.HYDRADB_DATABASE,
     poll_seconds: float = 2.0,
     timeout_seconds: float = 120.0,
-):
+    max_stragglers: int = 0,
+) -> set[str]:
     """collection MUST match the collection used at ingest time or the status
-    poll returns FILE_NOT_FOUND for every id (a scope mismatch, not a missing file)."""
+    poll returns FILE_NOT_FOUND for every id (a scope mismatch, not a missing file).
+
+    Returns the set of ids still not indexed (stragglers) if that set's size is
+    <= max_stragglers; raises otherwise. Observed in practice: an occasional
+    single memory gets permanently wedged in "queued" for an entire dialogue
+    batch while 200+ siblings index normally within seconds -- treating that as
+    a hard failure would throw away an otherwise-successful ingest. Not
+    decorated with @_retry(): it already polls internally, so retrying the
+    whole function would multiply the timeout.
+    """
     client = _client()
     elapsed = 0.0
     remaining = set(ids)
     failures: dict[str, str] = {}
     while remaining and elapsed < timeout_seconds:
-        resp = await client.context.status(database=database, collection=collection, ids=list(remaining))
+        try:
+            resp = await asyncio.wait_for(
+                client.context.status(database=database, collection=collection, ids=list(remaining)),
+                timeout=config.HYDRA_REQUEST_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            # Let the outer batch retry decide whether this is transient. Do not
+            # spend the entire dialogue timeout waiting on one dead HTTP call.
+            return remaining
         for s in resp.data.statuses:
             if s.indexing_status in TERMINAL_SUCCESS:
                 remaining.discard(s.id)
@@ -158,8 +261,9 @@ async def wait_for_indexed(
         elapsed += poll_seconds
     if failures:
         raise RuntimeError(f"{len(failures)} memories failed indexing: {failures}")
-    if remaining:
+    if remaining and len(remaining) > max_stragglers:
         raise TimeoutError(f"{len(remaining)} memories not indexed after {timeout_seconds}s: {remaining}")
+    return remaining
 
 
 @_retry()
@@ -201,32 +305,70 @@ async def query(
 
 
 @_retry()
-async def relations(collection: str, database: str = config.HYDRADB_DATABASE, id: str | None = None, limit: int = 100, cursor: float = 0):
+async def relations(
+    collection: str,
+    database: str = config.HYDRADB_DATABASE,
+    id: str | None = None,
+    limit: int = 100,
+    cursor: float | None = None,
+):
     client = _client()
-    kwargs = dict(database=database, collection=collection, type="memory", limit=limit, cursor=cursor)
+    kwargs = dict(database=database, collection=collection, type="memory", limit=limit)
     if id:
         kwargs["id"] = id
+    # The API treats cursor=0 as "after timestamp zero" and returns no rows;
+    # omit it for the initial page. Pass a cursor only when continuing pagination.
+    if cursor is not None:
+        kwargs["cursor"] = cursor
     return await client.context.relations(**kwargs)
 
 
 @_retry()
+async def set_metadata(
+    fact_id: str,
+    collection: str,
+    metadata: dict,
+    database: str = config.HYDRADB_DATABASE,
+):
+    """Merge schema-declared database metadata onto one indexed source."""
+    client = _client()
+    return await client.context.update_source_metadata(
+        fact_id,
+        database=database,
+        collection=collection,
+        database_metadata=metadata,
+    )
+
+
 async def set_status(fact_id: str, collection: str, status: str, database: str = config.HYDRADB_DATABASE):
     """Set the schema-declared `status` field on one source.
 
     Gotcha: context.ingest() has no field to set schema-declared metadata per
     memory. A freshly-ingested fact's `status` is unset, and
     metadata_filters={"status": "current"} excludes unset rows (it is not a
-    default value, it's a hard match). So every NEW fact needs this call with
-    status="current" right after ingest, not just superseded facts flipped to
-    "historical" -- otherwise the "current" view silently loses every fact that
-    was never superseded.
+    default value, it's a hard match).
     """
-    client = _client()
-    return await client.context.update_source_metadata(
-        fact_id,
+    return await set_metadata(fact_id, collection, {"status": status}, database=database)
+
+
+async def set_fact_metadata(
+    fact,
+    collection: str,
+    database: str = config.HYDRADB_DATABASE,
+    source_id: str | None = None,
+):
+    """Materialize every schema field used by current-view and coverage reads."""
+    return await set_metadata(
+        source_id or fact.id,
+        collection,
+        {
+            "status": fact.status,
+            "predicate": fact.predicate,
+            "subject": fact.subject,
+            "session_idx": fact.session_idx,
+            "dialogue_id": fact.dialogue_id,
+        },
         database=database,
-        collection=collection,
-        tenant_metadata={"status": status},
     )
 
 

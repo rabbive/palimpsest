@@ -2,16 +2,28 @@
 
 Processes one dialogue's sessions in strict chronological order. Every accepted
 fact becomes exactly one HydraDB memory (per-fact granularity is required for
-per-source `status` flipping to mean anything).
+per-source ``status`` flipping to mean anything).
 """
 
 import asyncio
 
 from palimpsest import config, hydra
-from palimpsest.extract import extract_session_facts, session_to_text
-from palimpsest.ledger import connect, facts_for_slot, insert_fact, mark_historical
+from palimpsest.extract import extract_session_facts
+from palimpsest.ledger import (
+    all_facts,
+    bump_pending_attempts,
+    clear_pending,
+    connect,
+    fact_exists,
+    facts_for_slot,
+    insert_fact,
+    mark_historical,
+    pending_ids,
+    record_pending,
+    source_ids,
+)
 from palimpsest.models import Fact
-from palimpsest.reconcile import reconcile_fact
+from palimpsest.reconcile import classify_pair, reconcile_fact
 
 EDGE_FOR_LABEL = {
     "REFINEMENT": "REFINES",
@@ -20,7 +32,12 @@ EDGE_FOR_LABEL = {
 }
 
 
-def _byog_payload(fact: Fact, prior: Fact | None, edge_predicate: str | None) -> dict:
+def _byog_payload(
+    fact: Fact,
+    prior: Fact | None,
+    edge_predicate: str | None,
+    source_id: str | None = None,
+) -> dict:
     entities = {
         "subject": {"name": fact.subject, "type": "ENTITY", "namespace": "palimpsest"},
         "object": {"name": fact.object, "type": "ENTITY", "namespace": "palimpsest"},
@@ -46,28 +63,133 @@ def _byog_payload(fact: Fact, prior: Fact | None, edge_predicate: str | None) ->
                 "temporal_details": f"supersedes {prior.id} at session {fact.session_idx}",
             }
         )
-    return {fact.id: {"entities": entities, "relations": relations}}
+    return {source_id or fact.id: {"entities": entities, "relations": relations}}
 
 
-async def process_dialogue(dialogue_id: str, sessions: list[tuple[int, str, str]], model: str = config.CHEAP_MODEL):
-    """sessions: list of (session_idx, session_ts, session_text), already chronological."""
+async def _set_remote_statuses(
+    collection: str,
+    facts: list[Fact],
+    not_indexed: set[str] | None = None,
+) -> None:
+    """Materialize metadata only for sources known to be indexed."""
+    not_indexed = not_indexed or set()
+    fact_ids = {fact.id for fact in facts}
+    predecessor_ids = {
+        fact.supersedes
+        for fact in facts
+        if fact.supersedes
+        and fact.supersedes not in not_indexed
+        and fact.supersedes not in fact_ids
+    }
+    canonical_ids = sorted(fact_ids | predecessor_ids)
+    with connect() as conn:
+        remote_ids = source_ids(conn, canonical_ids)
+
+    flip_sem = asyncio.Semaphore(max(1, config.INGEST_CONCURRENCY * 4))
+
+    async def _bounded_fact(fact: Fact) -> None:
+        async with flip_sem:
+            await hydra.set_fact_metadata(
+                fact,
+                collection,
+                source_id=remote_ids[fact.id],
+            )
+
+    async def _bounded_historical(fact_id: str) -> None:
+        async with flip_sem:
+            await hydra.set_status(remote_ids[fact_id], collection, "historical")
+
+    # Materialize all schema fields used by coverage queries, not only status.
+    # Then hide predecessors that were indexed in an earlier batch.
+    await asyncio.gather(*[_bounded_fact(fact) for fact in facts])
+    await asyncio.gather(*[_bounded_historical(fact_id) for fact_id in predecessor_ids])
+
+
+async def _retry_pending(dialogue_id: str, stats: dict) -> None:
+    """Resume facts checkpointed before a previous run timed out or crashed."""
+    with connect() as conn:
+        ids = pending_ids(conn, dialogue_id)
+        facts_by_id = {fact.id: fact for fact in all_facts(conn, dialogue_id)}
+        facts = [facts_by_id[fact_id] for fact_id in ids if fact_id in facts_by_id]
+        remote_ids = source_ids(conn, ids)
+
+    if not facts:
+        return
+
+    memories = [
+        {
+            "id": remote_ids[fact.id],
+            "text": f"{fact.subject} {fact.predicate.lower().replace('_', ' ')} {fact.object}.",
+            "infer": False,
+        }
+        for fact in facts
+    ]
+    graph_payload = {}
+    for fact in facts:
+        prior = facts_by_id.get(fact.supersedes)
+        edge = None
+        if prior:
+            label, _reason = classify_pair(prior, fact)
+            edge = EDGE_FOR_LABEL.get(label, "SUPERSEDES")
+        graph_payload.update(
+            _byog_payload(
+                fact,
+                prior,
+                edge,
+                source_id=remote_ids[fact.id],
+            )
+        )
+
+    straggler_sources = await hydra.ingest_facts_with_backpressure(
+        collection=dialogue_id,
+        memories=memories,
+        graph_payload=graph_payload,
+    )
+    fact_by_source = {source_id: fact_id for fact_id, source_id in remote_ids.items()}
+    stragglers = {fact_by_source[source_id] for source_id in straggler_sources}
+    indexed_facts = [fact for fact in facts if fact.id not in stragglers]
+    if indexed_facts:
+        await _set_remote_statuses(dialogue_id, indexed_facts, not_indexed=stragglers)
+
+    with connect() as conn:
+        clear_pending(conn, [fact.id for fact in indexed_facts])
+        bump_pending_attempts(conn, sorted(stragglers), "still queued after retry")
+
+    if stragglers:
+        stats["stragglers"] = sorted(set(stats.get("stragglers", [])) | stragglers)
+
+
+async def process_dialogue(
+    dialogue_id: str,
+    sessions: list[tuple[int, str, str]],
+    model: str = config.CHEAP_MODEL,
+):
+    """Process sessions chronologically with checkpointed HydraDB ingestion."""
     new_memories: list[dict] = []
     graph_payload: dict = {}
-    to_flip: list[tuple[str, str]] = []  # (fact_id, collection)
     stats = {"NEW": 0, "DUPLICATE": 0, "REFINEMENT": 0, "SUPERSESSION": 0, "CONTRADICTION": 0}
 
-    # The ledger write and the HydraDB write must succeed or fail together: if
-    # the `with` block below exits normally it auto-commits (see ledger.connect),
-    # so any HydraDB call that can fail (ingest, indexing, status flips) has to
-    # run *inside* this block. Otherwise a failed ingest still leaves committed
-    # ledger rows for facts HydraDB never received (hit this exact bug on
-    # dialogue 7 -- a too-large batch tripped HydraDB's 413 token budget after
-    # the ledger had already committed).
+    # A previous run may have committed facts locally before HydraDB finished
+    # indexing them. Retry those IDs first; this makes reruns resumable and avoids
+    # treating a queued fact as a duplicate that never gets re-submitted.
+    await _retry_pending(dialogue_id, stats)
+
+    # Reconciliation and pending-ingest records are committed before remote
+    # calls. This is an outbox/checkpoint: a HydraDB timeout no longer rolls back
+    # the whole dialogue, and the next run can retry only unfinished sources.
     with connect() as conn:
         for session_idx, session_ts, session_text in sessions:
-            candidates = extract_session_facts(dialogue_id, session_idx, session_text, session_ts, model=model)
+            candidates = extract_session_facts(
+                dialogue_id, session_idx, session_text, session_ts, model=model
+            )
 
             for candidate in candidates:
+                # Fact IDs are deterministic. On a resumed run, do not invoke
+                # reconciliation again for a fact already checkpointed locally;
+                # only the pending-ingest outbox needs remote work.
+                if fact_exists(conn, candidate.id):
+                    stats["DUPLICATE"] += 1
+                    continue
                 decision = reconcile_fact(conn, candidate)
                 stats[decision.label] += 1
 
@@ -77,36 +199,61 @@ async def process_dialogue(dialogue_id: str, sessions: list[tuple[int, str, str]
                 fact = decision.candidate
                 prior = None
                 if decision.prior_fact_id:
-                    priors = facts_for_slot(conn, fact.dialogue_id, fact.subject, fact.predicate, status=None)
+                    priors = facts_for_slot(
+                        conn, fact.dialogue_id, fact.subject, fact.predicate, status=None
+                    )
                     prior = next((p for p in priors if p.id == decision.prior_fact_id), None)
 
                 if decision.label in ("REFINEMENT", "SUPERSESSION"):
                     fact.supersedes = decision.prior_fact_id
                     if prior:
                         mark_historical(conn, prior.id, fact.id)
-                        to_flip.append((prior.id, dialogue_id))
 
                 insert_fact(conn, fact)
-                new_memories.append({"id": fact.id, "text": f"{fact.subject} {fact.predicate.lower().replace('_', ' ')} {fact.object}.", "infer": False})
-                graph_payload.update(
-                    _byog_payload(fact, prior, EDGE_FOR_LABEL.get(decision.label))
+                new_memories.append(
+                    {
+                        "id": fact.id,
+                        "text": f"{fact.subject} {fact.predicate.lower().replace('_', ' ')} {fact.object}.",
+                        "infer": False,
+                    }
                 )
+                graph_payload.update(_byog_payload(fact, prior, EDGE_FOR_LABEL.get(decision.label)))
 
         if new_memories:
-            await hydra.ingest_facts_batched(collection=dialogue_id, memories=new_memories, graph_payload=graph_payload)
-            await hydra.wait_for_indexed([m["id"] for m in new_memories], collection=dialogue_id)
-            # ingest() cannot set schema-declared metadata per memory -- every new
-            # fact starts with `status` unset, which metadata_filters={"status":
-            # "current"} treats as a non-match, not a default. Must flip explicitly.
-            await asyncio.gather(*[hydra.flip_to_current(m["id"], collection=dialogue_id) for m in new_memories])
+            record_pending(conn, [memory["id"] for memory in new_memories], dialogue_id)
 
-        for fact_id, collection in to_flip:
-            await hydra.flip_to_historical(fact_id, collection=collection)
+    if new_memories:
+        all_ids = [memory["id"] for memory in new_memories]
+        stragglers = await hydra.ingest_facts_with_backpressure(
+            collection=dialogue_id,
+            memories=new_memories,
+            graph_payload=graph_payload,
+        )
+        indexed_ids = set(all_ids) - stragglers
+
+        with connect() as conn:
+            fact_rows = {fact.id: fact for fact in all_facts(conn, dialogue_id)}
+        await _set_remote_statuses(
+            dialogue_id,
+            [fact_rows[memory["id"]] for memory in new_memories if memory["id"] in indexed_ids],
+            not_indexed=stragglers,
+        )
+
+        with connect() as conn:
+            clear_pending(conn, sorted(indexed_ids))
+            bump_pending_attempts(conn, sorted(stragglers), "still queued after retry")
+
+        if stragglers:
+            stats["stragglers"] = sorted(stragglers)
 
     return stats
 
 
-async def process_dialogues(dialogues: dict[str, list[tuple[int, str, str]]], model: str = config.CHEAP_MODEL, concurrency: int = config.INGEST_CONCURRENCY):
+async def process_dialogues(
+    dialogues: dict[str, list[tuple[int, str, str]]],
+    model: str = config.CHEAP_MODEL,
+    concurrency: int = config.INGEST_CONCURRENCY,
+):
     sem = asyncio.Semaphore(concurrency)
 
     async def _bounded(dialogue_id, sessions):

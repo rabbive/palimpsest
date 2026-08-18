@@ -31,6 +31,7 @@ def _call(model: str, messages: list[dict], temperature: float) -> str:
         temperature=temperature,
         api_key=config.LLM_API_KEY,
         api_base=config.LLM_API_BASE,
+        timeout=config.LLM_TIMEOUT_SECONDS,
     )
     return resp.choices[0].message.content
 

@@ -6,5 +6,6 @@ __pycache__/
 data/
 results/raw/
 results/*.sqlite3
+results/*.sqlite3-*
 .pytest_cache/
 *.egg-info/
