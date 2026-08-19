@@ -10,6 +10,63 @@ Work top to bottom. Each step says what to check and what to do when it fails.
 
 ---
 
+## STATUS — Steps 0-8 executed 2026-08-19
+
+**Steps 0 through 6 are done and pushed** (commit `15b8df5`). Step 7 was declined
+deliberately. What remains is the video and the Google Form.
+
+- **Step 0** — clean tree, `uv sync`, tests pass.
+- **Step 1** — `status` clean, the 2 known `hydra_pending` rows untouched.
+  `verify 8` proves the current-view contract. **Its BYOG line now prints empty** —
+  see the finding below; this is expected, not a new failure.
+- **Step 2** — arm B provisioned, 5 sources each for dialogues 7 and 8. **It needed a
+  workaround**, see below.
+- **Steps 3-4** — smoke clean, then the full sweep: 120 arm-runs, **0 errored**, $6.69.
+- **Step 5** — all four tables generated, committed, pushed.
+- **Step 6** — classifier at 88% over the 17 pairs that reach it, 90% of 20.
+- **Step 7** — **declined.** Dialogues 1-6 are already ingested (the step below is
+  stale on that point); extending would cost ~$27 in arm-A input alone the day before
+  the deadline, and would not change the conclusion, which is structural rather than a
+  sampling artefact.
+- **Step 8** — clean clone verified: 46 passed, 20 skipped. Video and Form outstanding.
+
+Total spend ~$11 of the $45 cap.
+
+### The headline result goes against the thesis
+
+A (stuffing) **0.46**, B (HydraDB default) **0.34**, C (PALIMPSEST) **0.31**. C's
+deficit is over-abstention, not wrong answers: it abstains on 56% of answerable
+questions, scoring 0.41 when it answers and 0.03 when it abstains. The ablations agree
+— switching the abstention gate off scores *higher* than leaving it on. Full reading
+in the README under "What the results actually show". This is reported as measured;
+do not retune an arm now and re-run.
+
+### Two findings that changed the docs
+
+**BYOG edges cannot be read back.** `context.relations()` returns zero relations for
+every arm-C source, on every read shape tried, while the same call against the
+`infer=True` arm-B database returns 21 and 16. The ingest reports neither a relation
+count nor an error, so `graph_payload` is silently ignored on `infer=False` ingests.
+Reproduced on a throwaway collection, so it is not corpus damage. **Not fixed** — the
+fix is a re-ingest, which freeze and the queue-exposure rule both forbid. Claim 1 is
+unaffected: it rests on `status` metadata filtering, which works, and `verify` still
+proves it.
+
+**Arm B provisioning fails silently at the default batch size.** `setup-arm-b` sends
+all 5 sessions in one request; that exceeds the 30s request timeout for an
+`infer=True` ingest, and the timeout is recorded as "queued" even though the sources
+were never created (`context.status` returns `FILE_NOT_FOUND`). If you ever re-run it,
+use env vars only — no code change:
+
+```bash
+PALIMPSEST_HYDRA_BATCH_SIZE=1 PALIMPSEST_HYDRA_REQUEST_TIMEOUT_SECONDS=120 \
+  uv run palimpsest setup-arm-b <ids>
+```
+
+Verify with a source count, never with the command's own "queued" line.
+
+---
+
 ## Step 0 — get this code onto your machine
 
 ```bash
@@ -174,11 +231,18 @@ to raise the number.
 
 ---
 
-## Step 7 — optional: grow the ingested subset
+## Step 7 — optional: grow the ingested subset — DECLINED, and stale as written
 
-Only if budget and clock both allow. `FROZEN_SUBSET` names dialogues 1–8 but **only 7 and
-8 are ingested**, so the README currently describes what was frozen, not what was
-evaluated. Ingesting more makes that claim true.
+**Superseded by what was found on 2026-08-19: dialogues 1–6 are already ingested.**
+`palimpsest status` reports current/historical counts for all eight (d1 72/20, d2
+72/26, d3 63/26, d4 31/20, d5 36/29, d6 116/61, d7 144/66, d8 135/55). What 1–6
+actually lack is an arm-B corpus and eval coverage, not ingestion — so the
+`ingest-all` sequence below is not the work that was left.
+
+Extending the *evaluation* to them was considered and declined: ~$27 in arm-A input
+tokens alone against a $45 cap with ~$11 spent, on the eve of the deadline, to sharpen
+per-category cells without changing a conclusion that is structural. The tables
+disclose their own 2-dialogue coverage. Kept below for reference only.
 
 ```bash
 uv run palimpsest ingest-all 1 2 3 4 5 6 --dry-run   # session counts + state, free
@@ -223,16 +287,23 @@ uv run palimpsest ask 8 "What is my current manager?"     # structured abstentio
 cat results/main_table.md results/ablation.md
 ```
 
-- `timeline 8` — superseded facts struck through. The palimpsest, visible.
-- `verify 8` — superseded fact absent from the current view, replacement present, BYOG
-  edge printed. Claim 1, proved on camera.
+- `timeline 8` — superseded facts struck through. The palimpsest, visible. Widen the
+  terminal first; at 80 columns the object and edge columns truncate.
+- `verify 8` — superseded fact absent from the current view, replacement present.
+  Claim 1, proved on camera. **The BYOG relations line prints empty** — say so out
+  loud and name it as a measured finding rather than editing around it; the README
+  documents why it is server-side. A defect you found and diagnosed reads as rigour.
 - `ask` on a missing slot — a structured abstention naming the slot. Claim 2.
+  Verified working: returns `missing_slots: ['user / MANAGES']`.
+- Consider showing `cost_latency.md` too: arm C answers at $0.0449 a question against
+  arm A's $0.3107. It is the one column where C wins outright.
 
 Final checklist:
 
 - [ ] Video ≤ 3:00, uploaded, link opens in a logged-out incognito window
-- [ ] `results/*.md` committed and pushed
-- [ ] README limitations match what actually happened (dialogue count, queued facts, classifier error rate)
+- [x] `results/*.md` committed and pushed — commit `15b8df5`
+- [x] README limitations match what actually happened — dialogue count, queued facts,
+      classifier error rate, the BYOG edge, and the headline result all updated
 - [ ] Google Form submitted — **mid-morning IST, not at the buzzer**
 
 ---
