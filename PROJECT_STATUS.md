@@ -1,7 +1,8 @@
 # PALIMPSEST runtime status
 
 _Last checked: 2026-08-18 after dialogue-8 ingestion and contract validation. Refresh before relying on counts._
-_Code updated 2026-08-19: the evaluation harness is resumable and the read path is bounded (see below)._
+_Code updated 2026-08-19: the evaluation harness is resumable, the read path is bounded,
+arm B is provisionable, and a clean clone was verified end to end (see below)._
 
 ## Ingested coverage
 
@@ -88,7 +89,12 @@ The full `make eval` was attempted after the preflight but reached the 30-minute
   - token and cost metering, nestable usage scopes, and an enforced spend cap. Cache
     entries written before metering existed are still honored, so no paid call is re-bought.
 - `src/palimpsest/cli.py`
-  - `status`, `timeline`, and `verify` — the inspector and the demo path.
+  - `status`, `timeline`, and `verify` — the inspector and the demo path;
+  - `setup-arm-b` provisions arm B independently of arm C;
+  - `classifier-accuracy` reports the classifier's error rate over 20 labelled pairs.
+- `conftest.py`
+  - project root on `sys.path`, so each test file passes standalone and not only
+    as part of a full-suite collection order.
 - `src/palimpsest/config.py`, `ledger.py`
   - `results/` created lazily, so a clean clone no longer fails on the ledger.
 - `src/palimpsest/write_path.py`, `cli.py`
@@ -100,11 +106,12 @@ The full `make eval` was attempted after the preflight but reached the 30-minute
 ## Validation
 
 ```text
-uv run pytest -q  -> 39 passed, 6 skipped
+uv run pytest -q  -> 46 passed, 20 skipped
 ```
 
-The 6 skips are the hand-labelled reconciliation pairs, which need a live LLM key.
-The 39 passing tests include the arm-B preflight, the multi-dialogue ingestion stop conditions, the evaluation harness's checkpoint/resume loop, the
+The 20 skips are the hand-labelled reconciliation pairs, which need a live LLM key;
+`palimpsest classifier-accuracy` scores them and writes the error rate.
+The 46 passing tests include the arm-B preflight, the multi-dialogue ingestion stop conditions, the evaluation harness's checkpoint/resume loop, the
 read-path ablation switches, the report tables, and the cost metering — all runnable
 offline, which is the point: the harness can be trusted before spending budget on it.
 
