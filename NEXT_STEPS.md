@@ -1,154 +1,268 @@
-# Next steps
+# Next steps — the finish runbook
 
-Deadline: **Aug 20, 2026, 11:59 PM PT** (Aug 21, 12:29 PM IST). Three deliverables due
-together: Google Form, public licensed repo, demo video ≤ 3:00.
+**Deadline:** Aug 20, 2026, 11:59 PM PT = **Aug 21, 12:29 PM IST**.
+Three deliverables, all due together: Google Form, public licensed repo, demo video ≤ 3:00.
 
-## P0 — stabilize the live state — complete
+**Feature freeze is in effect.** Everything below is running, measuring, and shipping.
+No new code. If something is broken, fix it; do not extend it.
 
-- [x] Confirm no ingestion worker is running.
-- [x] Diagnose dialogue-7's persistent queue state.
-- [x] Recover 16 affected facts with deterministic source aliases after approved same-ID reset failed.
-- [x] Verify 210 completed sources, 144 current / 66 historical, complete schema metadata, BYOG relations, and an end-to-end answer.
+Work top to bottom. Each step says what to check and what to do when it fails.
 
-## P1 — ingest dialogue 8 independently — complete
+---
 
-- [x] Run `./.venv/bin/palimpsest ingest 8`, not `ingest-all 7 8`.
-- [x] Keep `.cache/` so completed LLM calls are reused.
-- [x] Watch both LLM request timeout behavior and the HydraDB queue counters.
-- [x] If a few sources queue, allow the process to checkpoint and continue; do not discard the local ledger.
+## Step 0 — get this code onto your machine
 
-## P2 — validate the write/read contract — complete
+```bash
+cd /path/to/palimpsest
+git status                 # commit or stash anything local first
+git pull origin master
+uv sync
+uv run pytest -q           # expect: 46 passed, 20 skipped
+```
 
-- [x] Check local facts and `hydra_pending` counts.
-- [x] Query HydraDB with `metadata_filters={"status":"current"}`.
-- [x] Verify a superseded fact is absent from the current view and the replacement is present.
-- [x] Verify `context.relations()` returns the expected BYOG replacement edge.
-- [x] Verify one deliberate missing-slot question returns a structured abstention.
+The 20 skips are the hand-labelled classifier pairs; they need `LLM_API_KEY` and are
+scored in Step 6, not here.
 
-All three checks are now a single command: `uv run palimpsest verify 8`.
+**If `git pull` conflicts:** your local `master` has commits that were never pushed.
+`git stash`, pull, then `git stash pop` and resolve. Do not force anything.
 
-## P3a — grow the ingested subset from 2 dialogues to 8
+---
 
-`FROZEN_SUBSET` in `eval/beam_loader.py` names dialogues 1–8, but only **7 and 8 are
-actually ingested**. Until 1–6 are in, the README's "8 of 20 dialogues" describes the
-frozen subset rather than the evaluated one. Ingesting them makes the claim true and
-roughly quadruples the evidence behind every table.
+## Step 1 — preflight, costs nothing
 
-`ingest-all` now enforces the stop conditions below in code instead of describing them,
-so this is safe to run unattended-ish. It halts and reports if:
+```bash
+uv run palimpsest status
+```
 
-- one dialogue leaves more than `--max-stragglers` (default 5) sources queued;
-- a **second** dialogue queues anything at all — sources queuing across independent
-  dialogues means the queue is unhealthy, not that one dialogue was unlucky;
-- a dialogue raises;
-- the spend cap is hit.
+Expect dialogues 7 and 8 with their current/historical counts, and **2 rows in
+`hydra_pending`** (`f_8_0001_000`, `f_8_0003_022`). Those two are known and reviewed —
+leave them alone. Do not delete or alias them.
 
-On a halt, everything already reconciled stays committed locally and queued IDs stay in
-the outbox, so rerunning resumes rather than restarting.
+```bash
+uv run palimpsest verify 8
+```
 
-- [ ] `uv run palimpsest ingest-all 1 2 3 4 5 6 --dry-run` — session counts, what is
-      already ingested, what is already stuck. Costs nothing.
-- [ ] `uv run palimpsest status` — confirm `hydra_pending` is what you expect first.
-- [ ] Ingest in **pairs, not all six**: `uv run palimpsest ingest-all 1 2`, check, then
-      `3 4`, then `5 6`. A halt then costs one pair, and you can evaluate after each.
-- [ ] After each pair: `uv run palimpsest verify <id>` and `uv run palimpsest timeline <id>`
-      to confirm supersession actually happened in that dialogue.
-- [ ] Re-run `make eval` after each pair — it resumes, so new dialogues just add rows.
+Re-proves the current-view contract live: superseded fact absent under
+`metadata_filters={"status":"current"}`, replacement present, BYOG edge printed. This is
+the §15 exit gate and the centrepiece of the demo.
 
-**Budget reality.** Dialogue 8 alone produced 190 facts from its sessions, and every
-session is one extraction call plus one reconciliation call per candidate landing on an
-occupied slot. Six dialogues is not a rounding error against the $45 cap. `ingest-all`
-prints running spend and halts at the cap. If you run out of budget or clock, **stop and
-evaluate what you have** — the spec's own risk register says partial with an explicit
-"N of M dialogues" note beats nothing, and every generated table already prints its
-coverage line.
+**If `verify` fails:** HydraDB is unhealthy or the metadata flip regressed. Stop and
+diagnose before spending anything — every arm-C number depends on this holding.
 
-**Order matters.** Ingest, then evaluate, then ingest more. Do not ingest all six and
-then discover the eval harness has a problem with 4× the questions.
+---
 
-## P3b — evaluate — unblocked, not yet run
+## Step 2 — provision arm B (required, one time)
 
-The first `make eval` was stopped at the 30-minute timeout without producing
-`results/raw_eval.json`; a dialogue-8-only retry then hit repeated HydraDB query
-`ReadTimeout`s before writing anything. Both failures were harness problems, and both
-are fixed:
+Arm B is HydraDB's own auto-extraction (`infer=True`) with no reconciliation. **B vs C is
+the load-bearing comparison** — it isolates what PALIMPSEST adds over the vendor default
+rather than over no memory system at all. Without it the main table proves much less.
 
-- results are appended to `results/raw_eval.jsonl` as each one lands, so an interrupted
-  run keeps everything it finished;
-- a rerun skips completed work and retries only errored rows;
-- each question is bounded by `PALIMPSEST_EVAL_QUESTION_TIMEOUT_SECONDS` (120s);
-- a failed question is recorded as a row with its error instead of killing the run;
-- read queries retry twice rather than six times, so one dead endpoint costs seconds
-  per question rather than minutes;
-- questions run concurrently, each on its own event loop, because the LLM client is
-  blocking and a shared loop serialized them regardless of the concurrency setting;
-- `make eval` no longer re-runs the write path, so evaluating cannot re-enter HydraDB's
-  ingestion queue.
+It lives in a **separate database** (`palimpsest_arm_b`) so the server's own extraction
+cannot contaminate arm C's corpus. That database has never existed.
 
-**Arm B has never been provisioned.** It lives in its own database
-(`palimpsest_arm_b`) because it ingests raw sessions with `infer=True`, and nothing had
-ever created it — the only code path that populated it also re-ingested arm C, which the
-runbook forbids for dialogues 7 and 8. That is now a standalone step, and an evaluation
-including arm B refuses to start without it rather than burning arm A and arm C budget
-on questions arm B cannot answer. Since B vs C is the load-bearing comparison, this is
-not optional.
+```bash
+uv run palimpsest setup-arm-b 7 8
+```
 
-Run it in this order:
+Expect: database ready, then per dialogue a source count. A few queued sources are fine.
 
-- [ ] `uv run palimpsest setup-arm-b 7 8` — creates the arm-B database and ingests its
-      corpus. One time per dialogue; does not touch arm C.
-- [ ] `uv run python -m eval.run_eval --dialogues 7,8 --limit-per-category 1 --arms C`
-      — smallest possible live check that the harness produces rows.
-- [ ] `make eval-smoke` — one question per category across A/B/C. Confirm
-      `results/raw_eval.jsonl` grows during the run, not at the end.
-- [ ] `make report` and read `results/main_table.md`. If the numbers are sane, continue.
-- [ ] `uv run python -m eval.run_eval --dialogues 7,8` — the full sweep across all six
-      arms. Safe to interrupt and rerun; it resumes.
-- [ ] `make report`, then commit `results/*.md` and `results/raw_eval.jsonl` so the
-      tables exist in the repo a judge clones.
+**If many sources queue:** this is a fresh `infer=True` ingest and carries the same queue
+exposure as any ingest. Stop after dialogue 7, check, then do 8 separately.
 
-The run prints a spend forecast before starting. Arm A stuffs the whole transcript into
-every question, so it dominates the bill — check that line against your remaining budget
-before committing to the full sweep. Hitting `PALIMPSEST_MAX_SPEND_USD` stops the run
-cleanly and keeps every checkpointed result.
+**If HydraDB refuses to create the database:** you can still run everything else with
+`--arms A,C` plus the ablations. Say so in the README rather than shipping a silently
+empty arm B.
 
-If HydraDB is unhealthy, run arms A and C only — A needs no HydraDB at all, and arm C's
-ablations reuse the corpus already ingested. Partial and honest beats nothing; every
-table prints its own coverage line.
+---
 
-**Do not** run the evaluation with `--ingest` against dialogues 7 or 8. They are already
-ingested, and two dialogue-8 facts (`f_8_0001_000`, `f_8_0003_022`) remain in
-`hydra_pending` after two bounded retries. Leave them; do not delete or alias them
-without explicit review. Ingestion for new dialogues goes through `palimpsest ingest-all`,
-which has the stop conditions; the evaluation's `--ingest` flag does not.
+## Step 3 — smoke the harness before spending
 
-## P4 — ship hygiene
+```bash
+uv run python -m eval.run_eval --dialogues 7,8 --limit-per-category 1 --arms C
+```
 
-- [ ] `uv run palimpsest classifier-accuracy` — writes
-      `results/classifier_accuracy.md`, which the README's limitations section links.
-      §14 asks for this number explicitly; `make report` now runs it too.
-- [ ] Run `uv run pytest -q` from a clean environment.
-- [ ] Clean-clone test: fresh directory, follow the README's own setup steps, confirm
-      they work. `results/` is created lazily now, so a clone no longer fails on the
-      ledger — verify that end to end anyway, since it is a §13.1 disqualifier.
-- [ ] Commit `results/*.md` once real numbers exist. An empty results directory reads
-      as an unfinished project.
-- [ ] Complete the demo and submission checklist in `PALIMPSEST_BUILD_SPEC.md` §13.
-- [ ] Record the video (§13.3 order, ≤ 3:00). The demo sequence is `make demo`:
-      `status` → `timeline 8` (superseded facts struck through) → `verify 8` (the
-      superseded fact absent from the current view, the replacement present, the BYOG
-      edge printed) → `ask 8` on a missing slot for the structured abstention → the
-      results tables.
-- [ ] Verify the video link opens in a logged-out incognito window.
-- [ ] Submit the form well before the buzzer.
+Smallest possible live check. Watch for rows appearing **during** the run:
 
-## Stop conditions
+```bash
+wc -l results/raw_eval.jsonl      # in a second terminal; should grow steadily
+```
 
-Stop a live run and reassess if:
+Then widen slightly:
 
-- a single HTTP call exceeds the configured timeout;
-- the same source IDs remain queued after two bounded retry rounds;
-- `hydra_pending` grows across independent dialogues;
-- a process is gone but a SQLite journal remains — first open the DB through `ledger.connect()` to let SQLite recover it;
-- an evaluation is producing errored rows faster than scored ones — check HydraDB
-  health before spending more of the budget.
+```bash
+make eval-smoke                   # one question per category, arms A/B/C
+make report
+cat results/main_table.md
+```
+
+The run prints a spend forecast before starting. **Read the arm-A line** — arm A stuffs
+the whole transcript into every question and dominates the bill. Check it against your
+remaining budget before Step 4.
+
+**If arm B errors on every question:** Step 2 did not take. Re-run it, or drop to
+`--arms A,C`.
+
+**If more rows error than score:** stop. HydraDB is unhealthy; do not spend more.
+
+---
+
+## Step 4 — the full sweep
+
+```bash
+uv run python -m eval.run_eval --dialogues 7,8
+```
+
+All six arms: A, B, C, and C's three ablations. Safe to interrupt with Ctrl-C and
+re-run — it resumes, skipping what succeeded and retrying only what errored.
+
+Useful variations:
+
+```bash
+# HydraDB flaky? A needs no HydraDB, and C's ablations reuse the ingested corpus.
+uv run python -m eval.run_eval --dialogues 7,8 --arms A,C,C_no_status_filter,C_no_coverage,C_neither
+
+# Reads timing out? Tighten the per-question bound so failures are cheap.
+PALIMPSEST_EVAL_QUESTION_TIMEOUT_SECONDS=60 uv run python -m eval.run_eval --dialogues 7,8
+
+# Rate limited? Lower concurrency.
+PALIMPSEST_EVAL_CONCURRENCY=2 uv run python -m eval.run_eval --dialogues 7,8
+```
+
+**If the spend cap trips:** the run stops cleanly and keeps every checkpointed result. Go
+to Step 5 with what you have, or raise `PALIMPSEST_MAX_SPEND_USD` and re-run to resume.
+
+---
+
+## Step 5 — generate and commit the tables ⭐
+
+This is the step that turns work into a submission. Do not skip it or leave it for later.
+
+```bash
+make report
+```
+
+Writes `results/main_table.md`, `results/ablation.md`, `results/cost_latency.md`, and
+`results/classifier_accuracy.md`. Every table prints its own coverage line, so a partial
+run reports as partial.
+
+```bash
+git add results NEXT_STEPS.md
+git commit -m "Add evaluation results over dialogues 7-8"
+git push origin master
+```
+
+**An empty `results/` directory reads as an unfinished project.** Commit whatever you
+have, even a smoke run. Partial and honest beats nothing — the build spec's own risk
+register says so.
+
+---
+
+## Step 6 — the classifier's error rate (15 minutes, high credibility)
+
+```bash
+uv run palimpsest classifier-accuracy
+cat results/classifier_accuracy.md
+```
+
+Scores the 5-way classifier over the 20 hand-labelled pairs in
+`eval/labelled_pairs.py`. §14 of the build spec asks for this explicitly: a known error
+rate beats a hidden one. `make report` runs it too, so Step 5 may already have.
+
+Read the output before shipping it. If accuracy is poor on the
+SUPERSESSION/CONTRADICTION pairs, **say that in the README** — do not relabel the pairs
+to raise the number.
+
+---
+
+## Step 7 — optional: grow the ingested subset
+
+Only if budget and clock both allow. `FROZEN_SUBSET` names dialogues 1–8 but **only 7 and
+8 are ingested**, so the README currently describes what was frozen, not what was
+evaluated. Ingesting more makes that claim true.
+
+```bash
+uv run palimpsest ingest-all 1 2 3 4 5 6 --dry-run   # session counts + state, free
+uv run palimpsest ingest-all 1 2                     # a PAIR at a time, never all six
+uv run palimpsest verify 1                           # supersession really happened
+uv run palimpsest setup-arm-b 1 2                    # arm B needs each new dialogue too
+uv run python -m eval.run_eval --dialogues 7,8,1,2   # resumes; new dialogues add rows
+make report && git add results && git commit -m "Extend results to dialogues 1-2" && git push
+```
+
+`ingest-all` halts on the documented stop conditions: one dialogue queuing more than
+`--max-stragglers` (default 5), a second dialogue queuing anything at all, a raised
+error, or the spend cap. On a halt, reconciled facts stay committed and queued IDs stay
+in the outbox — re-running resumes.
+
+**Stop growing the moment either budget or clock gets tight.** Dialogue count is a
+footnote every table already discloses. A missing video is a disqualifier.
+
+---
+
+## Step 8 — ship
+
+```bash
+uv run pytest -q                  # 46 passed, 20 skipped
+git status                        # clean; results/ committed
+```
+
+Clean-clone check — a §13.1 disqualifier, so do it even though it passed in CI-like
+conditions already:
+
+```bash
+cd /tmp && rm -rf clone-test
+git clone https://github.com/rabbive/palimpsest.git clone-test
+cd clone-test && uv sync && uv run pytest -q
+```
+
+Demo sequence for the video (§13.3 order, ≤ 3:00 — record in the morning, not at night):
+
+```bash
+make demo          # status -> timeline 8 -> verify 8
+uv run palimpsest ask 8 "What is my current manager?"     # structured abstention
+cat results/main_table.md results/ablation.md
+```
+
+- `timeline 8` — superseded facts struck through. The palimpsest, visible.
+- `verify 8` — superseded fact absent from the current view, replacement present, BYOG
+  edge printed. Claim 1, proved on camera.
+- `ask` on a missing slot — a structured abstention naming the slot. Claim 2.
+
+Final checklist:
+
+- [ ] Video ≤ 3:00, uploaded, link opens in a logged-out incognito window
+- [ ] `results/*.md` committed and pushed
+- [ ] README limitations match what actually happened (dialogue count, queued facts, classifier error rate)
+- [ ] Google Form submitted — **mid-morning IST, not at the buzzer**
+
+---
+
+## Troubleshooting
+
+| Symptom | Action |
+|---|---|
+| Arm B errors on every question | Step 2 did not take. Re-run `setup-arm-b`, or use `--arms A,C,...` |
+| Eval produces mostly errored rows | HydraDB unhealthy. Stop, check `verify`, do not keep spending |
+| Read timeouts | Lower `PALIMPSEST_EVAL_QUESTION_TIMEOUT_SECONDS`; failures get cheap, run continues |
+| Rate limits / 429s | `PALIMPSEST_EVAL_CONCURRENCY=2` |
+| Spend cap tripped | Results are kept. Report on them, or raise the cap and re-run to resume |
+| A dialogue leaves many sources queued | `ingest-all` already halted. See `docs/INGESTION_OPERATIONS.md`; do not force |
+| `results/raw_eval.jsonl` looks wrong | Never delete it — it is the checkpoint, and deleting re-buys every completed question |
+| Interrupted run | Just re-run the same command. It resumes |
+
+## Hard rules
+
+- Never delete `results/raw_eval.jsonl` to "start clean".
+- Never pass `--ingest` to the evaluation for dialogues 7 or 8; they are already ingested.
+- Never delete or alias `f_8_0001_000` / `f_8_0003_022` without explicit review.
+- Never delete remote memories to recover from an indexing incident.
+- Add dialogues in pairs through `ingest-all`, never all at once.
+
+## Already done
+
+- **P0** live state stabilized: 210 dialogue-7 facts, 16 recovered under deterministic aliases.
+- **P1** dialogue 8 ingested independently: 190 facts, 188 indexed, 2 queued and reviewed.
+- **P2** write/read contract validated — now re-runnable as `palimpsest verify`.
+- **Harness** made resumable and bounded; ablation arms, cost/latency, and the three
+  report tables added; arm B made provisionable; ingestion stop conditions enforced in
+  code; clean clone verified. See `PROJECT_STATUS.md` for the full change list.
