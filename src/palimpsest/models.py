@@ -47,12 +47,28 @@ class Answer(BaseModel):
     abstention: Abstention | None = None
     provenance: list[str] = Field(default_factory=list)
     intent: str = "CURRENT"
+    latency_seconds: float = 0.0
+    cost_usd: float = 0.0
+
+
+# Arm C variants. The bare arm name is the full system; the ablations switch off
+# exactly one read-path mechanism each, so they need no separate ingestion.
+ArmName = Literal["A", "B", "C", "C_no_status_filter", "C_no_coverage", "C_neither"]
 
 
 class EvalResult(BaseModel):
     dialogue_id: str
     category: str
     question: str
-    arm: Literal["A", "B", "C"]
+    arm: ArmName
     llm_response: str
     llm_judge_score: float | None = None
+    abstained: bool = False
+    latency_seconds: float = 0.0
+    cost_usd: float = 0.0
+    error: str | None = None
+
+    @property
+    def key(self) -> str:
+        """Stable identity for checkpoint/resume deduplication."""
+        return f"{self.dialogue_id}|{self.category}|{self.arm}|{self.question}"

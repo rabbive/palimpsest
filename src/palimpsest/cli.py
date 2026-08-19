@@ -6,7 +6,7 @@ import typer
 from rich import print as rprint
 from rich.progress import track
 
-from palimpsest import config, hydra
+from palimpsest import config, hydra, ledger
 from palimpsest.read_path import answer_question
 from palimpsest.write_path import process_dialogue
 
@@ -114,6 +114,124 @@ def ingest_all(dialogues: list[str] = typer.Argument(None)):
             rprint(f"dialogue {dialogue_id}: {stats}")
 
     asyncio.run(_run())
+
+
+@app.command()
+def timeline(dialogue_id: str, subject: str = typer.Option("", help="only this subject"), predicate: str = typer.Option("", help="only this predicate")):
+    """The inspector: every fact in session order, superseded ones struck through.
+
+    Reads the SQLite ledger, not HydraDB — this is the write-time reconciliation
+    record, and HydraDB has no traversal query language to walk a supersession
+    chain with. Answers never come from here; see `ask`.
+    """
+    from rich.table import Table
+
+    with ledger.connect() as conn:
+        facts = ledger.all_facts(conn, dialogue_id)
+
+    if subject:
+        facts = [f for f in facts if f.subject == subject.strip().lower()]
+    if predicate:
+        facts = [f for f in facts if f.predicate == predicate.strip().upper()]
+    if not facts:
+        rprint(f"[yellow]no facts in the ledger for dialogue {dialogue_id!r} with those filters[/yellow]")
+        raise typer.Exit(code=1)
+
+    table = Table(title=f"dialogue {dialogue_id} — {len(facts)} facts", show_lines=False)
+    table.add_column("session", justify="right")
+    table.add_column("fact id")
+    table.add_column("subject")
+    table.add_column("predicate")
+    table.add_column("object")
+    table.add_column("status")
+    table.add_column("edge")
+
+    for fact in facts:
+        historical = fact.status == "historical"
+        style = "strike dim" if historical else "bold green"
+        edge = ""
+        if fact.supersedes:
+            edge = f"SUPERSEDES {fact.supersedes}"
+        elif fact.superseded_by:
+            edge = f"superseded by {fact.superseded_by}"
+        table.add_row(
+            str(fact.session_idx), fact.id, fact.subject, fact.predicate, fact.object,
+            "historical" if historical else "current", edge,
+            style=style,
+        )
+
+    rprint(table)
+    current = sum(1 for f in facts if f.status == "current")
+    rprint(f"[bold]{current} current[/bold] / {len(facts) - current} historical")
+
+
+@app.command()
+def verify(dialogue_id: str):
+    """Prove the current-view contract against the live database.
+
+    Picks a fact that was actually superseded, then shows three things: the
+    superseded fact is absent under metadata_filters={"status": "current"},
+    its replacement is present, and context.relations() returns the BYOG edge
+    that links them. This is the Day-1 exit gate, kept runnable so it can be
+    re-proved on demand instead of asserted.
+    """
+    async def _run():
+        with ledger.connect() as conn:
+            facts = ledger.all_facts(conn, dialogue_id)
+            superseded = [f for f in facts if f.status == "historical" and f.superseded_by]
+            if not superseded:
+                rprint(f"[yellow]no superseded facts in the ledger for dialogue {dialogue_id}[/yellow]")
+                raise typer.Exit(code=1)
+            old = superseded[-1]
+            new = next((f for f in facts if f.id == old.superseded_by), None)
+            remote = ledger.source_ids(conn, [old.id] + ([new.id] if new else []))
+
+        rprint(f"[bold]superseded:[/bold] {old.id} — {old.subject} {old.predicate} {old.object}")
+        if new:
+            rprint(f"[bold]replacement:[/bold] {new.id} — {new.subject} {new.predicate} {new.object}")
+
+        question = f"{old.subject} {old.predicate.lower().replace('_', ' ')}"
+        result = await hydra.query(
+            q=question, collection=dialogue_id, metadata_filters={"status": "current"}, graph_context=True
+        )
+        ids = [c.id for c in (result.data.chunks or [])]
+        old_absent = remote[old.id] not in ids
+        new_present = new is not None and remote[new.id] in ids
+        rprint(f"[{'green' if old_absent else 'red'}]superseded fact absent from the current view: {old_absent}[/]")
+        rprint(f"[{'green' if new_present else 'yellow'}]replacement present in the current view: {new_present}[/]")
+
+        if new:
+            rels = await hydra.relations(collection=dialogue_id, id=remote[new.id])
+            rprint("[bold]BYOG relations on the replacement:[/bold]")
+            rprint(rels.data)
+
+    asyncio.run(_run())
+
+
+@app.command()
+def status(dialogue_id: str = typer.Argument("", help="restrict to one dialogue")):
+    """Local ledger counts and the HydraDB outbox, without touching the network."""
+    with ledger.connect() as conn:
+        where = " WHERE dialogue_id = ?" if dialogue_id else ""
+        args = (dialogue_id,) if dialogue_id else ()
+        rows = conn.execute(
+            f"SELECT dialogue_id, status, count(*) FROM facts{where} GROUP BY dialogue_id, status ORDER BY dialogue_id",
+            args,
+        ).fetchall()
+        pending = conn.execute(
+            f"SELECT dialogue_id, count(*), max(attempts) FROM hydra_pending{where} GROUP BY dialogue_id",
+            args,
+        ).fetchall()
+        aliases = conn.execute("SELECT count(*) FROM hydra_source_aliases").fetchone()[0]
+
+    for row in rows:
+        rprint(f"dialogue {row[0]}: {row[2]} {row[1]}")
+    if pending:
+        for row in pending:
+            rprint(f"[yellow]dialogue {row[0]}: {row[1]} queued in hydra_pending (max {row[2]} attempts)[/yellow]")
+    else:
+        rprint("[green]hydra_pending is empty[/green]")
+    rprint(f"recovery aliases: {aliases}")
 
 
 @app.command()

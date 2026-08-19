@@ -1,5 +1,8 @@
 # Next steps
 
+Deadline: **Aug 20, 2026, 11:59 PM PT** (Aug 21, 12:29 PM IST). Three deliverables due
+together: Google Form, public licensed repo, demo video ≤ 3:00.
+
 ## P0 — stabilize the live state — complete
 
 - [x] Confirm no ingestion worker is running.
@@ -22,28 +25,63 @@
 - [x] Verify `context.relations()` returns the expected BYOG replacement edge.
 - [x] Verify one deliberate missing-slot question returns a structured abstention.
 
-## P3 — evaluate
+All three checks are now a single command: `uv run palimpsest verify 8`.
 
-- [x] Run the frozen-subset preflight after dialogue 7/8 state was understood.
-- [ ] Run `make eval` and preserve `results/raw_eval.json`.
-- [ ] Run `make report` and inspect `results/main_table.md`, `results/ablation.md`, and `results/cost_latency.md`.
-- [x] Record dialogue-7/8 indexed-source counts and persistent straggler count honestly.
+## P3 — evaluate — unblocked, not yet run
 
-**Evaluation status:** `make eval` was stopped at the 30-minute timeout without producing
-`results/raw_eval.json`. A dialogue-8-only retry later hit repeated HydraDB query
-`ReadTimeout`s before writing its output. That partial run also checkpointed two new
-dialogue-8 facts (`f_8_0001_000`, `f_8_0003_022`) that remain queued after two bounded
-retries. Leave them in `hydra_pending`; do not delete or alias them without explicit
-review. Do not rerun the full eval blindly; it needs checkpointed progress and narrower
-retry budgets first.
+The first `make eval` was stopped at the 30-minute timeout without producing
+`results/raw_eval.json`; a dialogue-8-only retry then hit repeated HydraDB query
+`ReadTimeout`s before writing anything. Both failures were harness problems, and both
+are fixed:
+
+- results are appended to `results/raw_eval.jsonl` as each one lands, so an interrupted
+  run keeps everything it finished;
+- a rerun skips completed work and retries only errored rows;
+- each question is bounded by `PALIMPSEST_EVAL_QUESTION_TIMEOUT_SECONDS` (120s);
+- a failed question is recorded as a row with its error instead of killing the run;
+- read queries retry twice rather than six times, so one dead endpoint costs seconds
+  per question rather than minutes;
+- questions run concurrently, each on its own event loop, because the LLM client is
+  blocking and a shared loop serialized them regardless of the concurrency setting;
+- `make eval` no longer re-runs the write path, so evaluating cannot re-enter HydraDB's
+  ingestion queue.
+
+Run it in this order:
+
+- [ ] `uv run python -m eval.run_eval --dialogues 7,8 --limit-per-category 1 --arms C`
+      — smallest possible live check that the harness produces rows.
+- [ ] `make eval-smoke` — one question per category across A/B/C. Confirm
+      `results/raw_eval.jsonl` grows during the run, not at the end.
+- [ ] `make report` and read `results/main_table.md`. If the numbers are sane, continue.
+- [ ] `uv run python -m eval.run_eval --dialogues 7,8` — the full sweep across all six
+      arms. Safe to interrupt and rerun; it resumes.
+- [ ] `make report`, then commit `results/*.md` and `results/raw_eval.jsonl` so the
+      tables exist in the repo a judge clones.
+
+If HydraDB is unhealthy, run arms A and C only — A needs no HydraDB at all, and arm C's
+ablations reuse the corpus already ingested. Partial and honest beats nothing; every
+table prints its own coverage line.
+
+**Do not** run with `--ingest` against dialogues 7 or 8. They are already ingested, and
+two dialogue-8 facts (`f_8_0001_000`, `f_8_0003_022`) remain in `hydra_pending` after
+two bounded retries. Leave them; do not delete or alias them without explicit review.
 
 ## P4 — ship hygiene
 
-- [ ] Add/commit the reliability changes and these context documents.
-- [ ] Ensure runtime DB/cache/log artifacts are ignored and no secrets are tracked.
-- [ ] Run `./.venv/bin/pytest -q` from a clean environment.
-- [ ] Update README limitations with the observed HydraDB queued-source behavior and the outbox mitigation.
-- [ ] Complete the demo and submission checklist in `PALIMPSEST_BUILD_SPEC.md`.
+- [ ] Run `uv run pytest -q` from a clean environment.
+- [ ] Clean-clone test: fresh directory, follow the README's own setup steps, confirm
+      they work. `results/` is created lazily now, so a clone no longer fails on the
+      ledger — verify that end to end anyway, since it is a §13.1 disqualifier.
+- [ ] Commit `results/*.md` once real numbers exist. An empty results directory reads
+      as an unfinished project.
+- [ ] Complete the demo and submission checklist in `PALIMPSEST_BUILD_SPEC.md` §13.
+- [ ] Record the video (§13.3 order, ≤ 3:00). The demo sequence is `make demo`:
+      `status` → `timeline 8` (superseded facts struck through) → `verify 8` (the
+      superseded fact absent from the current view, the replacement present, the BYOG
+      edge printed) → `ask 8` on a missing slot for the structured abstention → the
+      results tables.
+- [ ] Verify the video link opens in a logged-out incognito window.
+- [ ] Submit the form well before the buzzer.
 
 ## Stop conditions
 
@@ -53,4 +91,5 @@ Stop a live run and reassess if:
 - the same source IDs remain queued after two bounded retry rounds;
 - `hydra_pending` grows across independent dialogues;
 - a process is gone but a SQLite journal remains — first open the DB through `ledger.connect()` to let SQLite recover it;
-- a full evaluation would spend budget without producing new cached results.
+- an evaluation is producing errored rows faster than scored ones — check HydraDB
+  health before spending more of the budget.

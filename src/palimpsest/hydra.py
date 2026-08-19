@@ -11,11 +11,11 @@ from palimpsest import config
 RETRYABLE = retry_if_exception_type(Exception)
 
 
-def _client() -> AsyncHydraDB:
+def _client(timeout: float | None = None) -> AsyncHydraDB:
     return AsyncHydraDB(
         token=config.HYDRADB_API_KEY,
         api_version="2",
-        timeout=config.HYDRA_REQUEST_TIMEOUT_SECONDS,
+        timeout=timeout if timeout is not None else config.HYDRA_REQUEST_TIMEOUT_SECONDS,
     )
 
 
@@ -24,6 +24,23 @@ def _retry():
         retry=RETRYABLE,
         stop=stop_after_attempt(6),
         wait=wait_exponential(multiplier=1, min=1, max=20),
+        reraise=True,
+    )
+
+
+def _query_retry():
+    """Reads get a much smaller retry budget than writes.
+
+    A dropped write costs an extraction call to redo, so six attempts are worth
+    it. A dropped read costs one question. The read path issues one query per
+    coverage slot plus one for the answer, so the write-side budget multiplied a
+    single unresponsive endpoint into minutes of wall clock per question -- the
+    failure mode that stalled the first full evaluation.
+    """
+    return retry(
+        retry=RETRYABLE,
+        stop=stop_after_attempt(max(1, config.HYDRA_QUERY_ATTEMPTS)),
+        wait=wait_exponential(multiplier=1, min=1, max=5),
         reraise=True,
     )
 
@@ -266,7 +283,7 @@ async def wait_for_indexed(
     return remaining
 
 
-@_retry()
+@_query_retry()
 async def query(
     q: str,
     database: str = config.HYDRADB_DATABASE,
@@ -281,8 +298,10 @@ async def query(
     recency_bias: float = 0.2,
     metadata_filters: dict | None = None,
     ids: list[str] | None = None,
+    timeout_seconds: float | None = None,
 ):
-    client = _client()
+    timeout = timeout_seconds if timeout_seconds is not None else config.HYDRA_QUERY_TIMEOUT_SECONDS
+    client = _client(timeout=timeout)
     kwargs = dict(
         query=q,
         database=database,
@@ -301,7 +320,10 @@ async def query(
         kwargs["metadata_filters"] = metadata_filters
     if ids:
         kwargs["ids"] = ids
-    return await client.query(**kwargs)
+    # The SDK's own timeout has been observed to hang past its deadline on a
+    # stalled read; wait_for is the outer guarantee that one query cannot eat
+    # an unbounded slice of the evaluation.
+    return await asyncio.wait_for(client.query(**kwargs), timeout=timeout)
 
 
 @_retry()

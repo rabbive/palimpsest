@@ -1,6 +1,7 @@
 # PALIMPSEST runtime status
 
 _Last checked: 2026-08-18 after dialogue-8 ingestion and contract validation. Refresh before relying on counts._
+_Code updated 2026-08-19: the evaluation harness is resumable and the read path is bounded (see below)._
 
 ## Current runtime
 
@@ -29,7 +30,7 @@ Dialogue 8 was first ingested independently with the disk cache intact. It recon
 
 The full `make eval` was attempted after the preflight but reached the 30-minute command timeout without writing `results/raw_eval.json`. A dialogue-8-only retry later failed on repeated HydraDB query `ReadTimeout`s. No evaluation results are being claimed yet; do not rerun blindly without checkpointed progress.
 
-## Reliability changes currently in the worktree
+## Reliability changes
 
 - `src/palimpsest/hydra.py`
   - small-batch backpressure;
@@ -51,15 +52,45 @@ The full `make eval` was attempted after the preflight but reached the 30-minute
 - `src/palimpsest/hydra.py`
   - `context.relations()` omits the API's invalid initial `cursor=0`; continuation cursors remain supported.
 - `.env.example`
-  - documents all queue and timeout controls.
+  - documents all queue, timeout, evaluation, and pricing controls.
 
-These changes are uncommitted. Do not discard them while recovering the live database.
+### Evaluation and read-path changes (2026-08-19)
+
+- `eval/run_eval.py`
+  - every result appended to `results/raw_eval.jsonl` the moment it is produced;
+  - resume skips completed rows and retries errored ones;
+  - per-question timeout, and a failure recorded as a row rather than raising;
+  - bounded concurrency, one event loop per worker thread (the LLM client is blocking,
+    so a single shared loop serialized every question);
+  - three read-path ablation arms over the corpus already ingested;
+  - ingestion is opt-in, so evaluating cannot re-enter HydraDB's queue.
+- `eval/report.py`
+  - writes `main_table.md`, `ablation.md`, and `cost_latency.md`;
+  - abstention measured in both directions, errored runs excluded from accuracy and
+    counted separately, coverage stated in every table;
+  - falls back to the JSONL checkpoint when a run never wrote its final JSON.
+- `src/palimpsest/hydra.py`
+  - reads get a two-attempt retry budget and their own timeout, separate from writes.
+- `src/palimpsest/read_path.py`
+  - `use_status_filter` / `use_coverage` switches; latency and cost on every answer.
+- `src/palimpsest/llm.py`
+  - token and cost metering, nestable usage scopes, and an enforced spend cap. Cache
+    entries written before metering existed are still honored, so no paid call is re-bought.
+- `src/palimpsest/cli.py`
+  - `status`, `timeline`, and `verify` — the inspector and the demo path.
+- `src/palimpsest/config.py`, `ledger.py`
+  - `results/` created lazily, so a clean clone no longer fails on the ledger.
 
 ## Validation
 
 ```text
-./.venv/bin/pytest -q  -> 9 passed
+uv run pytest -q  -> 23 passed, 6 skipped
 ```
+
+The 6 skips are the hand-labelled reconciliation pairs, which need a live LLM key.
+The 23 passing tests include the evaluation harness's checkpoint/resume loop, the
+read-path ablation switches, the report tables, and the cost metering — all runnable
+offline, which is the point: the harness can be trusted before spending budget on it.
 
 ## Important interpretation
 

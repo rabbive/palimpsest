@@ -29,15 +29,50 @@ model's judgment call).
 
 ## Results
 
-See `results/main_table.md` (arms A/B/C x BEAM category), `results/ablation.md`, and
-`results/cost_latency.md` once `make eval && make report` has been run against a
-provisioned HydraDB database and a live LLM key.
+`make eval && make report` writes three tables into `results/`, against a provisioned
+HydraDB database and a live LLM key:
+
+| File | Contents |
+|---|---|
+| `main_table.md` | arms A / B / C x BEAM category, plus abstention rate measured in both directions |
+| `ablation.md` | arm C against its three read-path ablations |
+| `cost_latency.md` | judge score, mean and p90 latency, cost per question, and errored runs per arm |
+
+**The arms.** A is full-context stuffing with no HydraDB at all. B is HydraDB's own
+auto-extraction (`infer=True`) with no reconciliation and no coverage check. C is
+PALIMPSEST. **B vs C is the load-bearing comparison** — it isolates what we engineered
+rather than what the vendor's API already does.
+
+**The ablations** switch off exactly one read-path mechanism each, against the *same*
+ingested corpus as arm C, so a difference is attributable to the mechanism rather than
+to a different write pass:
+
+- `C_no_status_filter` — the materialized current view off. The `SUPERSEDES` edges are
+  still written and the metadata is still flipped; the reader just stops enforcing it.
+  This is precisely the read-time reconciliation this project argues against, so it is
+  the number that tests claim 1.
+- `C_no_coverage` — graph-property abstention off, testing claim 2.
+- `C_neither` — both off.
+
+**Abstention is reported in both directions.** Abstaining on BEAM's abstention questions
+is correct; the same behaviour on an answerable question is a false abstention. A system
+that abstained on everything would look perfect on the first number and useless on the
+second, so both are printed side by side.
+
+**Running an evaluation is resumable.** Every result is appended to
+`results/raw_eval.jsonl` the moment it lands, each question is bounded by its own
+timeout, and a failure is recorded as a row rather than killing the run. Re-running
+skips what already succeeded and retries only what errored. This is not incidental
+polish: the first full evaluation attempt was a single sequential pass that wrote its
+output only at the end, and a 30-minute timeout destroyed all of it.
 
 **Honest note on subset size:** the frozen eval subset is 8 of 20 BEAM-100K
 dialogues (`eval/beam_loader.py::FROZEN_SUBSET`), weighted toward the categories our
 architecture targets (Abstention, Contradiction Resolution, Knowledge Update,
 Temporal Reasoning, Event Ordering) rather than the full 20-dialogue set, to fit the
-time and API-cost budget of a solo 90-hour build.
+time and API-cost budget of a solo 90-hour build. Each generated table states its own
+coverage — how many questions, which dialogues, how many arm-runs errored — so a
+partial run reports as a partial run rather than as a complete one.
 
 ## How we use HydraDB
 
@@ -67,6 +102,20 @@ read path:   question -> read_path.py (intent) -> coverage.py (premise check)
              -> hydra.query() -> answer, or a structured Abstention
 ```
 
+### Inspecting it
+
+```bash
+uv run palimpsest status          # local fact counts and the HydraDB outbox, no network
+uv run palimpsest timeline 8      # every fact in session order, superseded ones struck through
+uv run palimpsest verify 8        # prove the current-view contract against the live database
+uv run palimpsest ask 8 "What is my current manager?"
+```
+
+`verify` is the Day-1 exit gate kept runnable: it picks a fact that was actually
+superseded, shows that it is absent under `metadata_filters={"status": "current"}`,
+that its replacement is present, and that `context.relations()` returns the BYOG edge
+linking them. Asserted contracts rot; a command that re-proves one does not.
+
 SQLite (`ledger.py`) is the write-time reconciliation *record* — supersession-chain
 walking, ablation switches, and inspector reads all hit it because HydraDB has no
 traversal query language. **Every answer path goes through `hydra.query()`; we never
@@ -76,14 +125,21 @@ answer from SQLite.**
 
 ```bash
 uv sync
-cp .env.example .env   # fill in HYDRADB_API_KEY, LLM_API_KEY
+cp .env.example .env    # fill in HYDRADB_API_KEY, LLM_API_KEY
 make setup              # clones BEAM into data/BEAM/ if not already present
 uv run palimpsest spike       # §4.4 ingestion throughput spike
 uv run palimpsest create-db   # provision the palimpsest database
-make ingest              # write path over the frozen eval subset
-make eval                # arms A/B/C + ablations
-make report              # results/*.md
+make ingest             # write path over the frozen eval subset
+make eval-smoke         # one question per category — proves the harness before spending
+make eval               # arms A/B/C + the three ablations, resumable
+make report             # results/*.md
+make test               # pytest
 ```
+
+`make eval` does **not** re-run the write path by default. Re-ingesting an
+already-ingested dialogue re-enters HydraDB's asynchronous queue for no benefit, and a
+queue incident during evaluation is exactly how the first run lost its output. Pass
+`--ingest` when the database is genuinely empty.
 
 ## Limitations
 
@@ -97,7 +153,15 @@ make report              # results/*.md
 - HydraDB can leave individual asynchronous ingestion sources queued even after the
   request is accepted. The write path uses small batches, bounded polling, retries
   only for queued IDs, and a SQLite `hydra_pending` outbox; persistent stragglers are
-  not marked current until indexing completes.
+  not marked current until indexing completes. Re-upserting a stuck ID does not reset
+  its queue state, so recovery goes through deterministic `r1_<canonical_id>` source
+  aliases held in the ledger — see `docs/INGESTION_OPERATIONS.md`.
+- HydraDB query reads can also time out. The read path issues one query per coverage
+  slot plus one for the answer, so reads deliberately get a much smaller retry budget
+  than writes (`PALIMPSEST_HYDRA_QUERY_ATTEMPTS=2`): a dropped write costs an
+  extraction to redo, a dropped read costs one question.
+- Reported cost counts money actually spent. A disk-cache hit is billed at zero, so a
+  cost column reflects the run that populated the cache rather than a re-run of it.
 - Closed predicate vocabulary (`src/palimpsest/vocab.py`) was derived from a skim of
   two BEAM-100K dialogues; it may miss predicates that appear in dialogues outside
   the frozen subset, which would fall through to `OTHER` and reduce slot-matching

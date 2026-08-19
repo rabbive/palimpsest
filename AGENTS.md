@@ -27,6 +27,8 @@ Every answer path must use HydraDB retrieval; SQLite is only the write-time ledg
 - Do not delete remote memories to recover from an indexing incident without explicit approval.
 - Use deterministic fact IDs and `upsert=true` for recovery.
 - Do not rerun a whole dialogue blindly when `hydra_pending` contains queued facts. Retry the pending IDs first.
+- Do not run the evaluation with `--ingest` against a dialogue that is already ingested. Evaluating must not re-enter HydraDB's ingestion queue.
+- Do not delete `results/raw_eval.jsonl` to "start clean". It is the checkpoint; deleting it re-buys every completed question.
 - Keep `infer=False`; extraction and reconciliation are ours.
 - Run `./.venv/bin/pytest -q` after code changes.
 - Before a long live run, check processes, local pending rows, HydraDB source counts, and the LLM cache.
@@ -34,6 +36,14 @@ Every answer path must use HydraDB retrieval; SQLite is only the write-time ledg
 ## Write-path reliability
 
 `src/palimpsest/hydra.py` now uses small-batch backpressure, bounded request timeouts, and retries only sources that remain queued. `src/palimpsest/ledger.py` stores an `hydra_pending` outbox. `src/palimpsest/write_path.py` checkpoints facts before remote calls and resumes pending IDs on the next run.
+
+Reads are bounded separately from writes: a dropped write costs an extraction to redo, a dropped read costs one question, and the read path issues one query per coverage slot plus one for the answer. Six write-grade retry attempts on a read turned one unresponsive endpoint into minutes per question.
+
+## Evaluation reliability
+
+`eval/run_eval.py` appends each result to `results/raw_eval.jsonl` as it lands, resumes by skipping completed rows and retrying errored ones, bounds each question with its own timeout, and records a failure as a row rather than ending the run. `eval/report.py` reads that checkpoint when the final JSON is missing, so an interrupted run still reports what it finished.
+
+Arm C's three ablations (`C_no_status_filter`, `C_no_coverage`, `C_neither`) are read-path switches over the corpus arm C already ingested — they cost queries, never a second write pass.
 
 Important config knobs:
 
@@ -43,6 +53,10 @@ Important config knobs:
 - `PALIMPSEST_HYDRA_QUEUE_RETRIES=2`
 - `PALIMPSEST_HYDRA_QUEUE_RETRY_BACKOFF_SECONDS=3`
 - `PALIMPSEST_LLM_TIMEOUT_SECONDS=60`
+- `PALIMPSEST_HYDRA_QUERY_ATTEMPTS=2`
+- `PALIMPSEST_HYDRA_QUERY_TIMEOUT_SECONDS=20`
+- `PALIMPSEST_EVAL_CONCURRENCY=4`
+- `PALIMPSEST_EVAL_QUESTION_TIMEOUT_SECONDS=120`
 
 Tune these through environment variables; do not hard-code provider-specific behavior.
 
@@ -50,9 +64,13 @@ Tune these through environment variables; do not hard-code provider-specific beh
 
 ```bash
 ./.venv/bin/pytest -q
+./.venv/bin/palimpsest status            # ledger counts + outbox, no network
+./.venv/bin/palimpsest timeline 8        # inspector: superseded facts struck through
+./.venv/bin/palimpsest verify 8          # re-prove the current-view contract live
 ./.venv/bin/palimpsest ingest 8
 ./.venv/bin/palimpsest ingest-all 7 8
-make eval
+make eval-smoke                          # one question per category
+make eval                                # resumable; safe to interrupt
 make report
 ```
 

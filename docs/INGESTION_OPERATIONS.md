@@ -121,3 +121,50 @@ make report
 - Do not mark queued facts `current` in HydraDB.
 - Do not use a large all-dialogue ingest batch to "unstick" the queue.
 - Do not treat a local SQLite commit as proof that HydraDB indexing finished.
+
+## Evaluation runs
+
+An evaluation is a read-heavy workload against the same database, and it failed twice
+for harness reasons before it ever failed for data reasons. What changed:
+
+- `eval/run_eval.py` appends each result to `results/raw_eval.jsonl` as it is produced.
+  An interrupted run keeps everything it finished.
+- Re-running skips rows already checkpointed and retries only rows that recorded an
+  error, so a HydraDB `ReadTimeout` costs one question rather than a whole run.
+- Each question is bounded by `PALIMPSEST_EVAL_QUESTION_TIMEOUT_SECONDS`.
+- Read queries retry twice, not six times. The read path issues one query per coverage
+  slot plus one for the answer; the write-side retry budget multiplied a single
+  unresponsive endpoint into minutes per question.
+- Ingestion is opt-in (`--ingest`, off by default), so evaluating an already-ingested
+  dialogue cannot re-enter HydraDB's ingestion queue.
+
+Safe sequence:
+
+```bash
+# smallest possible live check
+uv run python -m eval.run_eval --dialogues 8 --limit-per-category 1 --arms C
+# one question per category, across the three main arms
+make eval-smoke
+make report
+# full sweep; safe to interrupt and rerun
+uv run python -m eval.run_eval --dialogues 7,8
+```
+
+Watch `results/raw_eval.jsonl` grow while the run is live:
+
+```bash
+wc -l results/raw_eval.jsonl
+grep -c '"error": null' results/raw_eval.jsonl
+```
+
+If errored rows outnumber scored ones, stop and check HydraDB health rather than
+spending more budget. `eval/report.py` reads the JSONL checkpoint when
+`results/raw_eval.json` is missing, so a stopped run still produces tables — each one
+prints its own coverage line, including how many arm-runs errored.
+
+### Do not
+
+- Do not delete `results/raw_eval.jsonl` to "start clean": it is the checkpoint, and
+  deleting it re-buys every completed question.
+- Do not pass `--ingest` for dialogues 7 or 8. They are ingested, and two dialogue-8
+  facts remain in `hydra_pending` pending explicit review.

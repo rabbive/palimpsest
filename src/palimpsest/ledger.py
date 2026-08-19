@@ -45,6 +45,9 @@ CREATE TABLE IF NOT EXISTS hydra_source_aliases (
 
 @contextmanager
 def connect(path: str = config.LEDGER_PATH):
+    # A clean clone has no results/ directory (it is gitignored), and sqlite3
+    # will not create the parent for us.
+    config.ensure_dirs()
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:
