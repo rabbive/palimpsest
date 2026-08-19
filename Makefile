@@ -31,6 +31,7 @@ eval-smoke:
 
 report:
 	uv run python -m eval.report
+	uv run palimpsest classifier-accuracy
 
 # The demo path: the reconciliation timeline, then the current-view contract
 # proved against the live database.

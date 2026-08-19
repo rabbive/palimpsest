@@ -124,6 +124,9 @@ which has the stop conditions; the evaluation's `--ingest` flag does not.
 
 ## P4 — ship hygiene
 
+- [ ] `uv run palimpsest classifier-accuracy` — writes
+      `results/classifier_accuracy.md`, which the README's limitations section links.
+      §14 asks for this number explicitly; `make report` now runs it too.
 - [ ] Run `uv run pytest -q` from a clean environment.
 - [ ] Clean-clone test: fresh directory, follow the README's own setup steps, confirm
       they work. `results/` is created lazily now, so a clone no longer fails on the

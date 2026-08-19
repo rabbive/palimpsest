@@ -354,6 +354,93 @@ def status(dialogue_id: str = typer.Argument("", help="restrict to one dialogue"
 
 
 @app.command()
+def classifier_accuracy(out: str = typer.Option("", help="markdown path; defaults to results/classifier_accuracy.md")):
+    """Score the 5-way classifier against the hand-labelled pairs and write the number.
+
+    §14 of the build spec: a known error rate beats a hidden one. This runs every
+    pair in `eval/labelled_pairs.py`, prints a per-pair result and a confusion
+    summary, and writes markdown the README links to.
+
+    Two accuracies are reported. Some pairs never reach the LLM in production --
+    `reconcile_fact` short-circuits an identical object value to DUPLICATE before
+    any model call -- so counting them as classifier wins would inflate the
+    figure. The headline number excludes them.
+    """
+    from collections import Counter
+
+    from eval.labelled_pairs import PAIRS
+    from palimpsest.reconcile import classify_pair
+
+    config.ensure_dirs()
+    destination = out or str(config.RESULTS_DIR / "classifier_accuracy.md")
+
+    rows = []
+    for pair in PAIRS:
+        if pair.deterministic:
+            predicted, reason = pair.expected, "resolved before the LLM by reconcile_fact"
+        else:
+            predicted, reason = classify_pair(pair.prior, pair.candidate)
+        correct = predicted == pair.expected
+        rows.append({"pair": pair, "predicted": predicted, "correct": correct, "reason": reason})
+        # Pad the plain text before adding markup: rich tags count toward an
+        # f-string's width and would break the column.
+        verdict = "ok" if correct else predicted
+        mark = f"[green]{verdict:<14}[/green]" if correct else f"[red]{verdict:<14}[/red]"
+        rprint(f"  {mark} expected {pair.expected:<14} {pair.label}")
+
+    judged = [r for r in rows if not r["pair"].deterministic]
+    hard = [r for r in judged if r["pair"].hard]
+    confusion = Counter(
+        (r["pair"].expected, r["predicted"]) for r in judged if not r["correct"]
+    )
+
+    def _pct(subset):
+        return (sum(1 for r in subset if r["correct"]) / len(subset)) if subset else 0.0
+
+    rprint("")
+    rprint(f"[bold]classifier accuracy: {_pct(judged):.0%}[/bold] over {len(judged)} LLM-judged pairs")
+    rprint(f"including the {len(rows) - len(judged)} deterministic pairs: {_pct(rows):.0%} of {len(rows)}")
+    if hard:
+        rprint(f"on the {len(hard)} pairs marked hard: {_pct(hard):.0%}")
+
+    lines = [
+        "# Reconciliation classifier accuracy",
+        "",
+        f"**{_pct(judged):.0%}** over {len(judged)} hand-labelled pairs that actually reach the",
+        "classifier, and "
+        f"{_pct(rows):.0%} over all {len(rows)} pairs including the "
+        f"{len(rows) - len(judged)} that `reconcile_fact` resolves deterministically",
+        "before any model call. The headline number is the former: counting the",
+        "short-circuited pairs as classifier wins would inflate it.",
+        "",
+        f"On the {len(hard)} pairs deliberately marked *hard* — almost all of them on the",
+        f"SUPERSESSION / CONTRADICTION boundary — accuracy is {_pct(hard):.0%}. Those pairs are in",
+        "the set on purpose; removing them to raise the score would be the wrong move.",
+        "",
+        "The pairs are synthetic and hand-labelled by the author, not drawn from BEAM",
+        "ground truth, so this measures whether the classifier applies our taxonomy as we",
+        "defined it — not whether the taxonomy is correct.",
+        "",
+        "| expected | predicted | pair | note |",
+        "|---|---|---|---|",
+    ]
+    for r in rows:
+        pair = r["pair"]
+        flag = "" if r["correct"] else " ⟵ miss"
+        note = pair.note or ("deterministic" if pair.deterministic else "")
+        lines.append(f"| {pair.expected} | {r['predicted']}{flag} | {pair.label} | {note} |")
+
+    if confusion:
+        lines += ["", "## Where it errs", "", "| expected | predicted | count |", "|---|---|---|"]
+        for (expected, predicted), count in confusion.most_common():
+            lines.append(f"| {expected} | {predicted} | {count} |")
+
+    with open(destination, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    rprint(f"[green]wrote {destination}[/green]")
+
+
+@app.command()
 def ask(dialogue_id: str, question: str):
     """Ask a question against one dialogue's memory via the read path."""
     async def _run():
