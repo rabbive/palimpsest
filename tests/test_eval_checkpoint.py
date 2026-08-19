@@ -106,6 +106,14 @@ def test_run_eval_checkpoints_each_result_and_resumes_after_a_kill(tmp_path, mon
     )
     monkeypatch.setattr(run_eval, "judge_question", lambda rubric, response: {"llm_judge_score": 1.0})
 
+    # Arm B is provisioned here; this test is about a flaky *query*, not a
+    # missing corpus. Without the stub the arm-B preflight refuses the run --
+    # which is its job, and is covered in tests/test_arm_b.py.
+    async def arm_b_ready(dialogue_id):
+        return 190
+
+    monkeypatch.setattr(run_eval, "arm_b_source_count", arm_b_ready)
+
     attempts: list[str] = []
 
     async def flaky_dispatch(dialogue_id, question, arm):

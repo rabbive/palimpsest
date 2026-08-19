@@ -46,6 +46,10 @@ Reads are bounded separately from writes: a dropped write costs an extraction to
 
 Arm C's three ablations (`C_no_status_filter`, `C_no_coverage`, `C_neither`) are read-path switches over the corpus arm C already ingested — they cost queries, never a second write pass.
 
+Arm B is a **separate database** (`<database>_arm_b`) holding raw sessions ingested with `infer=True`, so HydraDB's own extraction cannot contaminate arm C's corpus. Provision it once with `palimpsest setup-arm-b <ids>`; an evaluation including arm B refuses to start without it. Do not populate arm B by passing the evaluation's `--ingest`, which re-runs arm C's write path.
+
+The spend cap is a stop condition, not a per-question error: hitting it aborts the run and keeps every checkpointed result.
+
 Important config knobs:
 
 - `PALIMPSEST_HYDRA_REQUEST_TIMEOUT_SECONDS=30`

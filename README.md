@@ -135,6 +135,7 @@ make setup              # clones BEAM into data/BEAM/ if not already present
 uv run palimpsest spike       # §4.4 ingestion throughput spike
 uv run palimpsest create-db   # provision the palimpsest database
 make ingest             # write path over the frozen eval subset
+make setup-arm-b        # one-time: provision arm B's separate database and corpus
 make eval-smoke         # one question per category — proves the harness before spending
 make eval               # arms A/B/C + the three ablations, resumable
 make report             # results/*.md
@@ -145,6 +146,13 @@ make test               # pytest
 already-ingested dialogue re-enters HydraDB's asynchronous queue for no benefit, and a
 queue incident during evaluation is exactly how the first run lost its output. Pass
 `--ingest` when the database is genuinely empty.
+
+**Arm B needs a one-time setup.** It lives in its own database (`<database>_arm_b`)
+because it ingests raw sessions with `infer=True` — letting HydraDB do its own
+extraction. Mixing that into arm C's database would contaminate the corpus being
+measured. Run `make setup-arm-b` (or `palimpsest setup-arm-b 7 8`) once per dialogue.
+An evaluation that includes arm B refuses to start when that corpus is missing, rather
+than spending arm A and arm C budget on questions arm B cannot answer.
 
 ## Limitations
 

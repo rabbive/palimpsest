@@ -85,8 +85,18 @@ are fixed:
 - `make eval` no longer re-runs the write path, so evaluating cannot re-enter HydraDB's
   ingestion queue.
 
+**Arm B has never been provisioned.** It lives in its own database
+(`palimpsest_arm_b`) because it ingests raw sessions with `infer=True`, and nothing had
+ever created it — the only code path that populated it also re-ingested arm C, which the
+runbook forbids for dialogues 7 and 8. That is now a standalone step, and an evaluation
+including arm B refuses to start without it rather than burning arm A and arm C budget
+on questions arm B cannot answer. Since B vs C is the load-bearing comparison, this is
+not optional.
+
 Run it in this order:
 
+- [ ] `uv run palimpsest setup-arm-b 7 8` — creates the arm-B database and ingests its
+      corpus. One time per dialogue; does not touch arm C.
 - [ ] `uv run python -m eval.run_eval --dialogues 7,8 --limit-per-category 1 --arms C`
       — smallest possible live check that the harness produces rows.
 - [ ] `make eval-smoke` — one question per category across A/B/C. Confirm
@@ -96,6 +106,11 @@ Run it in this order:
       arms. Safe to interrupt and rerun; it resumes.
 - [ ] `make report`, then commit `results/*.md` and `results/raw_eval.jsonl` so the
       tables exist in the repo a judge clones.
+
+The run prints a spend forecast before starting. Arm A stuffs the whole transcript into
+every question, so it dominates the bill — check that line against your remaining budget
+before committing to the full sweep. Hitting `PALIMPSEST_MAX_SPEND_USD` stops the run
+cleanly and keeps every checkpointed result.
 
 If HydraDB is unhealthy, run arms A and C only — A needs no HydraDB at all, and arm C's
 ablations reuse the corpus already ingested. Partial and honest beats nothing; every

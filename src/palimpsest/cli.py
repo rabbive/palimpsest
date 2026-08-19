@@ -198,6 +198,44 @@ def ingest_all(
 
 
 @app.command()
+def setup_arm_b(dialogues: list[str] = typer.Argument(None, help="dialogue ids; defaults to the frozen subset")):
+    """Provision and populate arm B: HydraDB's own auto-extraction, no reconciliation.
+
+    Arm B is the load-bearing comparison — it isolates what PALIMPSEST adds over
+    the vendor default rather than over no memory system at all. It lives in a
+    separate database (`<database>_arm_b`) because it ingests raw sessions with
+    `infer=True`, and letting the server extract into arm C's corpus would
+    contaminate the thing being measured.
+
+    Run this once per dialogue before evaluating with arm B. It does not touch
+    arm C's database.
+    """
+    from eval.beam_loader import FROZEN_SUBSET, iter_sessions
+    from eval.run_eval import ARM_B_DATABASE, arm_b_source_count, ensure_arm_b_database, setup_arm_b as _setup
+
+    ids = dialogues or FROZEN_SUBSET
+
+    async def _run():
+        rprint(f"[bold]arm B database:[/bold] {ARM_B_DATABASE}")
+        await ensure_arm_b_database()
+        rprint("[green]database ready[/green]")
+
+        for dialogue_id in ids:
+            existing = await arm_b_source_count(dialogue_id)
+            if existing:
+                rprint(f"dialogue {dialogue_id}: {existing} sources already present, re-upserting")
+            sessions = len(list(iter_sessions(dialogue_id)))
+            rprint(f"[bold]dialogue {dialogue_id}[/bold]: ingesting {sessions} raw sessions (infer=True)")
+            stragglers = await _setup(dialogue_id)
+            total = await arm_b_source_count(dialogue_id)
+            if stragglers:
+                rprint(f"[yellow]dialogue {dialogue_id}: {len(stragglers)} sources still queued[/yellow]")
+            rprint(f"dialogue {dialogue_id}: {total} sources in arm B")
+
+    asyncio.run(_run())
+
+
+@app.command()
 def timeline(dialogue_id: str, subject: str = typer.Option("", help="only this subject"), predicate: str = typer.Option("", help="only this predicate")):
     """The inspector: every fact in session order, superseded ones struck through.
 

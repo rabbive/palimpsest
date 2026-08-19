@@ -156,6 +156,14 @@ for harness reasons before it ever failed for data reasons. What changed:
 - Ingestion is opt-in (`--ingest`, off by default), so evaluating an already-ingested
   dialogue cannot re-enter HydraDB's ingestion queue.
 
+Arm B is a separate database and a separate one-time ingest. It holds raw sessions with
+`infer=True` so HydraDB's own extraction cannot contaminate arm C's corpus, and an
+evaluation including arm B refuses to start when that corpus is missing:
+
+```bash
+uv run palimpsest setup-arm-b 7 8    # creates palimpsest_arm_b, ingests its corpus
+```
+
 Safe sequence:
 
 ```bash

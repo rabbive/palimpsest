@@ -5,6 +5,11 @@ _Code updated 2026-08-19: the evaluation harness is resumable and the read path 
 
 ## Ingested coverage
 
+**Arm B has never been provisioned.** Its database (`palimpsest_arm_b`) did not exist
+and nothing created it, so the load-bearing B-vs-C comparison has no data behind it
+yet. `palimpsest setup-arm-b <ids>` is now the one-time step; an evaluation including
+arm B refuses to start without it.
+
 `FROZEN_SUBSET` names dialogues 1–8. **Only 7 and 8 are ingested.** Dialogues 1–6 are
 the next live work — see `NEXT_STEPS.md` P3a, which runs them in pairs through the
 guarded `ingest-all`. Until they land, results tables cover 2 dialogues and say so.
@@ -95,11 +100,11 @@ The full `make eval` was attempted after the preflight but reached the 30-minute
 ## Validation
 
 ```text
-uv run pytest -q  -> 29 passed, 6 skipped
+uv run pytest -q  -> 39 passed, 6 skipped
 ```
 
 The 6 skips are the hand-labelled reconciliation pairs, which need a live LLM key.
-The 29 passing tests include the multi-dialogue ingestion stop conditions, the evaluation harness's checkpoint/resume loop, the
+The 39 passing tests include the arm-B preflight, the multi-dialogue ingestion stop conditions, the evaluation harness's checkpoint/resume loop, the
 read-path ablation switches, the report tables, and the cost metering — all runnable
 offline, which is the point: the harness can be trusted before spending budget on it.
 

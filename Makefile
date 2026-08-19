@@ -1,4 +1,4 @@
-.PHONY: setup spike create-db ingest eval eval-smoke report demo test clean
+.PHONY: setup spike create-db ingest setup-arm-b eval eval-smoke report demo test clean
 
 setup:
 	uv sync
@@ -12,6 +12,11 @@ create-db:
 
 ingest:
 	uv run palimpsest ingest-all
+
+# Arm B needs its own database and a one-time infer=True ingest per dialogue.
+# Run this before any evaluation that includes arm B.
+setup-arm-b:
+	uv run palimpsest setup-arm-b
 
 # Resumable: results are appended to results/raw_eval.jsonl as they land, so an
 # interrupted run loses at most the questions in flight. Re-running skips what
