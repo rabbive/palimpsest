@@ -80,23 +80,60 @@ frozen subset reports as exactly that. Check `results/main_table.md` for the dia
 behind any number quoted here, and `uv run palimpsest status` for what is ingested
 locally.
 
+### What the results actually show
+
+**Arm C does not win.** Over 20 questions on dialogues 7 and 8, all 120 arm-runs
+scoring without error: A (full-context stuffing) **0.46**, B (HydraDB `infer=True`)
+**0.34**, C (PALIMPSEST) **0.31**. The B-vs-C comparison this project called
+load-bearing goes against the thesis at this sample size.
+
+The cause is legible in the rows rather than mysterious. Arm C abstains on **56% of
+answerable questions**. Split C's non-abstention questions by what it did: when C
+answers, it averages **0.41**; when it abstains on an answerable question, it averages
+**0.03**. So C's deficit is almost entirely over-abstention, not wrong answers.
+
+The abstentions are slot-matching failures, not retrieval failures. The read path
+decomposes a question into `(entity, predicate)` slots and abstains when a slot is
+uncovered, and BEAM's derived questions do not decompose cleanly — "How many days
+between finishing my first draft and my goal to improve my essay grades?" becomes
+`my first draft / COMPLETED_PROJECT` + `my goal to improve my essay grades / HAS_GOAL`
+and abstains, as does "When is my Zoom call with the creative director scheduled?" on
+`my zoom call with the creative director / SCHEDULED_FOR`. The mechanism does what it
+was designed to do; the design demands an exact slot hit for question shapes that are
+multi-hop or phrased away from the closed predicate vocabulary. That is the same
+slot-matching precision limitation listed below, and this is what it costs.
+
+The ablations agree. Turning the abstention mechanism **off** (`C_no_coverage`, 0.34)
+scores *higher* than full C (0.31) — claim 2's mechanism is net-negative as tuned.
+Turning both mechanisms off (0.21) is worst, so the machinery is not worthless; the
+abstention gate is simply mistuned for these question shapes. Arm C is also the
+cheapest arm by a wide margin: $0.0449 per question against arm A's $0.3107, roughly
+7× less for the transcript-stuffing baseline that beats it.
+
+These numbers come from 20 questions on 2 dialogues, n=4 per category cell — small
+enough that per-category figures are noisy and should not be read as rankings. The
+overall column and the abstention split are the parts with enough rows to lean on.
+The result is reported as measured; no arm was retuned after seeing it.
+
 ## How we use HydraDB
 
 - Memories corpus, **one memory per Fact**, `infer=False` — we do our own extraction
   and reconciliation, so we don't want the server reinterpreting facts we already
   resolved.
-- BYOG `graph_payload`: every fact carries its own subject/object entities and a
+- BYOG `graph_payload`: every fact is sent with its own subject/object entities and a
   `REFINES` / `SUPERSEDES` / `CONTRADICTS` edge back to the fact it replaces, with
-  `temporal_details` naming the session it happened at.
+  `temporal_details` naming the session it happened at. **These edges are not
+  readable back out** — see the BYOG limitation below.
 - Schema-declared `status` metadata (declared at `databases.create` time, per the
   SDK's hard constraint that `metadata_filters` only works on schema-declared
   fields) → deterministic current-view filtering on every read.
 - Hybrid query (`query_by="hybrid"`) + `graph_context=True` for retrieval and
   provenance (`query_paths` becomes the answer's citation trail).
-- **What this project would lose without HydraDB:** the persisted, queryable graph
-  and the schema-declared metadata filter. Without them we'd be re-deriving "what's
-  current" from the SQLite ledger on every read — which is exactly the read-time
-  reconciliation this project argues against.
+- **What this project would lose without HydraDB:** the schema-declared metadata
+  filter above all — without it we'd be re-deriving "what's current" from the SQLite
+  ledger on every read, which is exactly the read-time reconciliation this project
+  argues against. The persisted graph was meant to carry the same weight, but on the
+  evidence below we never got our own edges back out of it.
 
 ## Architecture
 
@@ -119,8 +156,9 @@ uv run palimpsest ask 8 "What is my current manager?"
 
 `verify` is the Day-1 exit gate kept runnable: it picks a fact that was actually
 superseded, shows that it is absent under `metadata_filters={"status": "current"}`,
-that its replacement is present, and that `context.relations()` returns the BYOG edge
-linking them. Asserted contracts rot; a command that re-proves one does not.
+and that its replacement is present. It also prints whatever `context.relations()`
+returns for the replacement, which is currently empty — see the BYOG limitation
+below. Asserted contracts rot; a command that re-proves one does not.
 
 SQLite (`ledger.py`) is the write-time reconciliation *record* — supersession-chain
 walking, ablation switches, and inspector reads all hit it because HydraDB has no
@@ -165,6 +203,23 @@ than spending arm A and arm C budget on questions arm B cannot answer.
   SUPERSESSION / CONTRADICTION boundary, which is the genuinely hard call: pairs
   testing it are marked `hard` and kept in the set deliberately. A known error rate
   beats a hidden one.
+- **The BYOG graph edges cannot be read back.** The write path sends a
+  `graph_payload` with every fact, and HydraDB accepts it — the ingest response
+  reports `relations_created=None` and `relations_error=None`, i.e. neither a count
+  nor an error. But `context.relations()` returns zero relations for every source in
+  the arm-C database, on every read shape tried (`type="memory"` and `"knowledge"`,
+  with and without a collection, with and without an `id`). The same call against the
+  arm-B database, whose sources were ingested with `infer=True` and went through the
+  server's own `graph_creation` stage, returns 21 relations for dialogue 7 and 16 for
+  dialogue 8. So the graph machinery works; the supplied `graph_payload` is silently
+  ignored on `infer=False` memory ingests. Reproduced on a fresh throwaway collection,
+  so it is not corpus damage. **Consequence:** the supersession edge is a claim this
+  project makes in its write path and cannot currently demonstrate through HydraDB's
+  read path. The current-view contract that `verify` proves does not depend on it — it
+  rests on schema-declared `status` metadata filtering, which does work — and neither
+  does any answer path, since `query_paths` provenance and the SQLite ledger carry the
+  chain. Untangling whether this is a payload-shape mismatch or a server-side gap was
+  out of scope under feature freeze.
 - Eval subset is 8/20 100K dialogues, not the full bucket (see above).
 - No traversal query language in HydraDB means chain-walking and the inspector UI
   read from a local SQLite mirror, not the store itself — stated plainly rather than

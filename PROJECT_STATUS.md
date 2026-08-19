@@ -1,19 +1,32 @@
 # PALIMPSEST runtime status
 
-_Last checked: 2026-08-18 after dialogue-8 ingestion and contract validation. Refresh before relying on counts._
+_Last checked: 2026-08-19 while executing the `NEXT_STEPS.md` runbook. Refresh before relying on counts._
 _Code updated 2026-08-19: the evaluation harness is resumable, the read path is bounded,
 arm B is provisionable, and a clean clone was verified end to end (see below)._
 
 ## Ingested coverage
 
-**Arm B has never been provisioned.** Its database (`palimpsest_arm_b`) did not exist
-and nothing created it, so the load-bearing B-vs-C comparison has no data behind it
-yet. `palimpsest setup-arm-b <ids>` is now the one-time step; an evaluation including
-arm B refuses to start without it.
+**Arm B is now provisioned** for dialogues 7 and 8 — 5 sources each in
+`palimpsest_arm_b`, verified by `arm_b_source_count`, so the arm-B guard passes.
+Dialogues 1–6 have no arm-B corpus and would need `setup-arm-b` per dialogue before
+they could be evaluated on that arm.
 
-`FROZEN_SUBSET` names dialogues 1–8. **Only 7 and 8 are ingested.** Dialogues 1–6 are
-the next live work — see `NEXT_STEPS.md` P3a, which runs them in pairs through the
-guarded `ingest-all`. Until they land, results tables cover 2 dialogues and say so.
+Provisioning needed one workaround. `setup-arm-b` batches sessions
+(`PALIMPSEST_HYDRA_BATCH_SIZE=8`, so all 5 sessions go in one request), and that
+request exceeds the 30s `PALIMPSEST_HYDRA_REQUEST_TIMEOUT_SECONDS` for an
+`infer=True` ingest. The timeout is caught and the IDs are recorded as "queued", but
+the sources were never created at all — `context.status` returned `FILE_NOT_FOUND`
+for every one. Sent one at a time they are accepted immediately. Use
+`PALIMPSEST_HYDRA_BATCH_SIZE=1 PALIMPSEST_HYDRA_REQUEST_TIMEOUT_SECONDS=120` when
+provisioning arm B; both are env-tunable, so no code change was made under freeze.
+
+`FROZEN_SUBSET` names dialogues 1–8. **All 8 are ingested in the local ledger** —
+`palimpsest status` reports current/historical counts for every one (dialogue 1: 72/20,
+2: 72/26, 3: 63/26, 4: 31/20, 5: 36/29, 6: 116/61, 7: 144/66, 8: 135/55). The earlier
+claim that only 7 and 8 were ingested is stale, as is `NEXT_STEPS.md` Step 7, which
+proposes ingesting 1–6 as optional remaining work. What dialogues 1–6 still lack is an
+arm-B corpus and any evaluation coverage; the committed results tables cover 7 and 8
+and disclose that in their own coverage lines.
 
 ## Current runtime
 
@@ -29,7 +42,19 @@ guarded `ingest-all`. Until they land, results tables cover 2 dialogues and say 
 - The first dialogue-8 ingest completed **188 sources** with **134 current / 54 historical** and complete schema metadata. A later partial eval run discovered two additional facts, which are checkpointed but not yet indexed.
 - Local SQLite ledger: dialogue 8 has **190 facts**, **135 current**, **55 historical**, and two `hydra_pending` rows (`f_8_0001_000`, `f_8_0003_022`).
 - The current-view contract is verified for the completed corpus: a historical source returns no chunk with `metadata_filters={"status":"current"}`, while its replacement does.
-- `context.relations()` returns the expected `SUPERSEDES` edge after fixing the initial `cursor=0` wrapper bug.
+- `context.relations()` **returns zero relations** for every arm-C source, so the
+  earlier claim that it returns the expected `SUPERSEDES` edge no longer holds. The
+  `cursor=0` wrapper fix is still in place and is not the cause. Checked across both
+  dialogues, `type="memory"` and `"knowledge"`, with and without a collection, and
+  with and without an `id`; the whole `palimpsest` database has no relations. Ingest
+  responses report `relations_created=None` and `relations_error=None` — neither a
+  count nor an error. The same call against `palimpsest_arm_b`, ingested with
+  `infer=True`, returns 21 relations for dialogue 7 and 16 for dialogue 8, so the
+  server's graph works and the supplied BYOG `graph_payload` is being silently ignored
+  on `infer=False` ingests. Reproduced on a throwaway collection with a synthetic
+  supersession pair, so this is not damage to the real corpus. Not fixed: the fix
+  would be a re-ingest of both dialogues, which feature freeze and the queue-exposure
+  rule both rule out. Documented in the README limitations instead.
 - `palimpsest ask 8 "What is my current manager?"` returns a structured abstention naming `user / MANAGES`.
 
 ## What happened
