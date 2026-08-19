@@ -49,9 +49,11 @@ ingested corpus as arm C, so a difference is attributable to the mechanism rathe
 to a different write pass:
 
 - `C_no_status_filter` — the materialized current view off. The `SUPERSEDES` edges are
-  still written and the metadata is still flipped; the reader just stops enforcing it.
+  still sent and the metadata is still flipped; the reader just stops enforcing it.
   This is precisely the read-time reconciliation this project argues against, so it is
-  the number that tests claim 1.
+  the number that tests claim 1. (What the arm actually varies is the metadata filter,
+  which is just as well given the edges turn out not to be readable — see the BYOG
+  limitation below.)
 - `C_no_coverage` — graph-property abstention off, testing claim 2.
 - `C_neither` — both off.
 

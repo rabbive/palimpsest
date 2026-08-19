@@ -115,13 +115,28 @@ the load-bearing comparison** — it isolates what PALIMPSEST adds over the vend
 rather than over no memory system at all. Without it the main table proves much less.
 
 It lives in a **separate database** (`palimpsest_arm_b`) so the server's own extraction
-cannot contaminate arm C's corpus. That database has never existed.
+cannot contaminate arm C's corpus. **Done on 2026-08-19** — the database exists and
+holds 5 sources for each of dialogues 7 and 8. Re-run this only for a new dialogue.
 
 ```bash
-uv run palimpsest setup-arm-b 7 8
+PALIMPSEST_HYDRA_BATCH_SIZE=1 PALIMPSEST_HYDRA_REQUEST_TIMEOUT_SECONDS=120 \
+  uv run palimpsest setup-arm-b 7 8
 ```
 
-Expect: database ready, then per dialogue a source count. A few queued sources are fine.
+The env vars are not optional. At the default batch size all 5 sessions go in one
+request, which exceeds the 30s request timeout for an `infer=True` ingest; the timeout
+is caught and the IDs are reported as "queued" even though **the sources were never
+created at all**. Sent one at a time they are accepted immediately.
+
+Expect: database ready, then per dialogue a source count. **Trust the source count, not
+the queued line** — a run that prints "5 sources still queued / 0 sources in arm B"
+created nothing, whatever the wording suggests. Confirm independently:
+
+```bash
+uv run python -c "
+import asyncio; from eval.run_eval import missing_arm_b_dialogues
+print('missing:', asyncio.run(missing_arm_b_dialogues(['7','8'])))"
+```
 
 **If many sources queue:** this is a fresh `infer=True` ingest and carries the same queue
 exposure as any ingest. Stop after dialogue 7, check, then do 8 separately.
