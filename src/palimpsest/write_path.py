@@ -249,6 +249,44 @@ async def process_dialogue(
     return stats
 
 
+def halt_reason(runs: list[dict], max_stragglers: int) -> str | None:
+    """Decide whether a multi-dialogue ingestion must stop, per NEXT_STEPS.md.
+
+    ``runs`` is the per-dialogue record so far, each entry ``{"dialogue_id",
+    "stats", "error"}``. Returns a human-readable reason to halt, or None to
+    continue.
+
+    These are the documented stop conditions, enforced rather than described.
+    The original `ingest-all 7 8` incident is what they exist for: the loop had
+    no notion of "this is going wrong", so a wedged queue on the first dialogue
+    was followed by submitting the next one into the same queue.
+    """
+    if not runs:
+        return None
+
+    last = runs[-1]
+    if last.get("error"):
+        return f"dialogue {last['dialogue_id']} failed: {last['error']}"
+
+    stragglers = last.get("stats", {}).get("stragglers", [])
+    if len(stragglers) > max_stragglers:
+        return (
+            f"dialogue {last['dialogue_id']} left {len(stragglers)} sources queued "
+            f"(limit {max_stragglers}); HydraDB indexing is not keeping up"
+        )
+
+    # `hydra_pending` growing across independent dialogues is the signal that the
+    # queue itself is unhealthy, not that one dialogue is unlucky.
+    with_stragglers = [r["dialogue_id"] for r in runs if r.get("stats", {}).get("stragglers")]
+    if len(with_stragglers) > 1:
+        return (
+            "sources are queuing across independent dialogues "
+            f"({', '.join(with_stragglers)}); stop and check HydraDB health"
+        )
+
+    return None
+
+
 async def process_dialogues(
     dialogues: dict[str, list[tuple[int, str, str]]],
     model: str = config.CHEAP_MODEL,

@@ -27,7 +27,46 @@ together: Google Form, public licensed repo, demo video ≤ 3:00.
 
 All three checks are now a single command: `uv run palimpsest verify 8`.
 
-## P3 — evaluate — unblocked, not yet run
+## P3a — grow the ingested subset from 2 dialogues to 8
+
+`FROZEN_SUBSET` in `eval/beam_loader.py` names dialogues 1–8, but only **7 and 8 are
+actually ingested**. Until 1–6 are in, the README's "8 of 20 dialogues" describes the
+frozen subset rather than the evaluated one. Ingesting them makes the claim true and
+roughly quadruples the evidence behind every table.
+
+`ingest-all` now enforces the stop conditions below in code instead of describing them,
+so this is safe to run unattended-ish. It halts and reports if:
+
+- one dialogue leaves more than `--max-stragglers` (default 5) sources queued;
+- a **second** dialogue queues anything at all — sources queuing across independent
+  dialogues means the queue is unhealthy, not that one dialogue was unlucky;
+- a dialogue raises;
+- the spend cap is hit.
+
+On a halt, everything already reconciled stays committed locally and queued IDs stay in
+the outbox, so rerunning resumes rather than restarting.
+
+- [ ] `uv run palimpsest ingest-all 1 2 3 4 5 6 --dry-run` — session counts, what is
+      already ingested, what is already stuck. Costs nothing.
+- [ ] `uv run palimpsest status` — confirm `hydra_pending` is what you expect first.
+- [ ] Ingest in **pairs, not all six**: `uv run palimpsest ingest-all 1 2`, check, then
+      `3 4`, then `5 6`. A halt then costs one pair, and you can evaluate after each.
+- [ ] After each pair: `uv run palimpsest verify <id>` and `uv run palimpsest timeline <id>`
+      to confirm supersession actually happened in that dialogue.
+- [ ] Re-run `make eval` after each pair — it resumes, so new dialogues just add rows.
+
+**Budget reality.** Dialogue 8 alone produced 190 facts from its sessions, and every
+session is one extraction call plus one reconciliation call per candidate landing on an
+occupied slot. Six dialogues is not a rounding error against the $45 cap. `ingest-all`
+prints running spend and halts at the cap. If you run out of budget or clock, **stop and
+evaluate what you have** — the spec's own risk register says partial with an explicit
+"N of M dialogues" note beats nothing, and every generated table already prints its
+coverage line.
+
+**Order matters.** Ingest, then evaluate, then ingest more. Do not ingest all six and
+then discover the eval harness has a problem with 4× the questions.
+
+## P3b — evaluate — unblocked, not yet run
 
 The first `make eval` was stopped at the 30-minute timeout without producing
 `results/raw_eval.json`; a dialogue-8-only retry then hit repeated HydraDB query
@@ -62,9 +101,11 @@ If HydraDB is unhealthy, run arms A and C only — A needs no HydraDB at all, an
 ablations reuse the corpus already ingested. Partial and honest beats nothing; every
 table prints its own coverage line.
 
-**Do not** run with `--ingest` against dialogues 7 or 8. They are already ingested, and
-two dialogue-8 facts (`f_8_0001_000`, `f_8_0003_022`) remain in `hydra_pending` after
-two bounded retries. Leave them; do not delete or alias them without explicit review.
+**Do not** run the evaluation with `--ingest` against dialogues 7 or 8. They are already
+ingested, and two dialogue-8 facts (`f_8_0001_000`, `f_8_0003_022`) remain in
+`hydra_pending` after two bounded retries. Leave them; do not delete or alias them
+without explicit review. Ingestion for new dialogues goes through `palimpsest ingest-all`,
+which has the stop conditions; the evaluation's `--ingest` flag does not.
 
 ## P4 — ship hygiene
 

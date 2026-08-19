@@ -27,6 +27,7 @@ Every answer path must use HydraDB retrieval; SQLite is only the write-time ledg
 - Do not delete remote memories to recover from an indexing incident without explicit approval.
 - Use deterministic fact IDs and `upsert=true` for recovery.
 - Do not rerun a whole dialogue blindly when `hydra_pending` contains queued facts. Retry the pending IDs first.
+- Add dialogues through `palimpsest ingest-all`, a pair at a time. It enforces the stop conditions; `--force` disables them and is for supervised recovery only.
 - Do not run the evaluation with `--ingest` against a dialogue that is already ingested. Evaluating must not re-enter HydraDB's ingestion queue.
 - Do not delete `results/raw_eval.jsonl` to "start clean". It is the checkpoint; deleting it re-buys every completed question.
 - Keep `infer=False`; extraction and reconciliation are ours.
@@ -68,7 +69,8 @@ Tune these through environment variables; do not hard-code provider-specific beh
 ./.venv/bin/palimpsest timeline 8        # inspector: superseded facts struck through
 ./.venv/bin/palimpsest verify 8          # re-prove the current-view contract live
 ./.venv/bin/palimpsest ingest 8
-./.venv/bin/palimpsest ingest-all 7 8
+./.venv/bin/palimpsest ingest-all 1 2 --dry-run  # counts + current state, free
+./.venv/bin/palimpsest ingest-all 1 2            # halts on the documented stop conditions
 make eval-smoke                          # one question per category
 make eval                                # resumable; safe to interrupt
 make report

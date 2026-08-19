@@ -3,6 +3,12 @@
 _Last checked: 2026-08-18 after dialogue-8 ingestion and contract validation. Refresh before relying on counts._
 _Code updated 2026-08-19: the evaluation harness is resumable and the read path is bounded (see below)._
 
+## Ingested coverage
+
+`FROZEN_SUBSET` names dialogues 1–8. **Only 7 and 8 are ingested.** Dialogues 1–6 are
+the next live work — see `NEXT_STEPS.md` P3a, which runs them in pairs through the
+guarded `ingest-all`. Until they land, results tables cover 2 dialogues and say so.
+
 ## Current runtime
 
 - No `palimpsest ingest` process is running.
@@ -80,15 +86,20 @@ The full `make eval` was attempted after the preflight but reached the 30-minute
   - `status`, `timeline`, and `verify` — the inspector and the demo path.
 - `src/palimpsest/config.py`, `ledger.py`
   - `results/` created lazily, so a clean clone no longer fails on the ledger.
+- `src/palimpsest/write_path.py`, `cli.py`
+  - `halt_reason()` encodes the documented stop conditions, and `ingest-all` enforces
+    them: a preflight showing what is ingested and what is stuck, a `--dry-run`, running
+    spend, and a halt when one dialogue queues heavily or a second dialogue queues at all.
+    This is the guard the original `ingest-all 7 8` run did not have.
 
 ## Validation
 
 ```text
-uv run pytest -q  -> 23 passed, 6 skipped
+uv run pytest -q  -> 29 passed, 6 skipped
 ```
 
 The 6 skips are the hand-labelled reconciliation pairs, which need a live LLM key.
-The 23 passing tests include the evaluation harness's checkpoint/resume loop, the
+The 29 passing tests include the multi-dialogue ingestion stop conditions, the evaluation harness's checkpoint/resume loop, the
 read-path ablation switches, the report tables, and the cost metering — all runnable
 offline, which is the point: the harness can be trusted before spending budget on it.
 

@@ -70,9 +70,14 @@ output only at the end, and a 30-minute timeout destroyed all of it.
 dialogues (`eval/beam_loader.py::FROZEN_SUBSET`), weighted toward the categories our
 architecture targets (Abstention, Contradiction Resolution, Knowledge Update,
 Temporal Reasoning, Event Ordering) rather than the full 20-dialogue set, to fit the
-time and API-cost budget of a solo 90-hour build. Each generated table states its own
-coverage — how many questions, which dialogues, how many arm-runs errored — so a
-partial run reports as a partial run rather than as a complete one.
+time and API-cost budget of a solo 90-hour build.
+
+The frozen subset is what we *intended* to evaluate; the tables report what we
+*did*. Every generated table prints its own coverage line — how many questions, which
+dialogue ids, how many arm-runs errored — so a run over fewer dialogues than the
+frozen subset reports as exactly that. Check `results/main_table.md` for the dialogues
+behind any number quoted here, and `uv run palimpsest status` for what is ingested
+locally.
 
 ## How we use HydraDB
 

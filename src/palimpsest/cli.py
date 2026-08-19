@@ -4,9 +4,8 @@ from pathlib import Path
 
 import typer
 from rich import print as rprint
-from rich.progress import track
 
-from palimpsest import config, hydra, ledger
+from palimpsest import config, hydra, ledger, llm
 from palimpsest.read_path import answer_question
 from palimpsest.write_path import process_dialogue
 
@@ -101,17 +100,99 @@ def ingest(dialogue_id: str = typer.Argument(..., help="BEAM 100K dialogue direc
 
 
 @app.command()
-def ingest_all(dialogues: list[str] = typer.Argument(None)):
-    """Ingest the frozen eval subset (or the given dialogue ids) sequentially, reporting stats."""
+def ingest_all(
+    dialogues: list[str] = typer.Argument(None),
+    max_stragglers: int = typer.Option(5, help="halt if one dialogue leaves more than this many sources queued"),
+    force: bool = typer.Option(False, help="ignore the stop conditions and keep going (not advised)"),
+    dry_run: bool = typer.Option(False, help="report what would be ingested and stop"),
+):
+    """Ingest the frozen eval subset (or the given dialogue ids), one at a time.
+
+    This enforces the stop conditions in NEXT_STEPS.md rather than describing
+    them. The original `ingest-all 7 8` incident happened because the loop had
+    no notion of "this is going wrong": dialogue 7 wedged HydraDB's queue and
+    dialogue 8 was submitted into the same queue anyway. Now a dialogue that
+    leaves too many sources queued, or a second dialogue that queues anything at
+    all, halts the run with what completed still committed.
+    """
     from eval.beam_loader import FROZEN_SUBSET, iter_sessions
+    from palimpsest.write_path import halt_reason
 
     ids = dialogues or FROZEN_SUBSET
 
+    # Preflight, all local: what is already ingested, and what is already stuck.
+    with ledger.connect() as conn:
+        counts = {
+            row[0]: row[1]
+            for row in conn.execute("SELECT dialogue_id, count(*) FROM facts GROUP BY dialogue_id")
+        }
+        pending = {
+            row[0]: row[1]
+            for row in conn.execute("SELECT dialogue_id, count(*) FROM hydra_pending GROUP BY dialogue_id")
+        }
+
+    rprint("[bold]preflight[/bold]")
+    for dialogue_id in ids:
+        try:
+            sessions = len(list(iter_sessions(dialogue_id)))
+        except FileNotFoundError:
+            rprint(f"  dialogue {dialogue_id}: [red]not found under data/BEAM/chats/100K[/red]")
+            raise typer.Exit(code=1)
+        known = counts.get(dialogue_id, 0)
+        queued = pending.get(dialogue_id, 0)
+        state = f"{known} facts already in the ledger" if known else "not yet ingested"
+        warn = f" [yellow]{queued} queued in hydra_pending[/yellow]" if queued else ""
+        rprint(f"  dialogue {dialogue_id}: {sessions} sessions, {state}{warn}")
+
+    total_new_sessions = sum(
+        len(list(iter_sessions(d))) for d in ids if not counts.get(d)
+    )
+    rprint(
+        f"[bold]{total_new_sessions} sessions[/bold] across not-yet-ingested dialogues; "
+        f"extraction alone is one LLM call each, and reconciliation adds one per candidate "
+        f"pair on an occupied slot. Spend cap is ${config.MAX_SPEND_USD:.2f}."
+    )
+    if dry_run:
+        raise typer.Exit()
+
+    if pending and not force:
+        rprint(
+            "[yellow]hydra_pending is not empty. Those IDs are retried first by the write "
+            "path, which is correct — but if they have already failed bounded retries, see "
+            "docs/INGESTION_OPERATIONS.md before adding new dialogues.[/yellow]"
+        )
+
     async def _run():
-        for dialogue_id in track(ids, description="ingesting"):
-            sessions = list(iter_sessions(dialogue_id))
-            stats = await process_dialogue(dialogue_id, sessions)
-            rprint(f"dialogue {dialogue_id}: {stats}")
+        runs: list[dict] = []
+        for dialogue_id in ids:
+            rprint(f"[bold]ingesting dialogue {dialogue_id}[/bold] (spend so far ${llm.spend_usd():.2f})")
+            try:
+                sessions = list(iter_sessions(dialogue_id))
+                stats = await process_dialogue(dialogue_id, sessions)
+                runs.append({"dialogue_id": dialogue_id, "stats": stats, "error": None})
+                rprint(f"dialogue {dialogue_id}: {stats}")
+            except llm.BudgetExceeded as exc:
+                runs.append({"dialogue_id": dialogue_id, "stats": {}, "error": str(exc)})
+                rprint(f"[red]spend cap reached: {exc}[/red]")
+                break
+            except Exception as exc:
+                runs.append({"dialogue_id": dialogue_id, "stats": {}, "error": f"{type(exc).__name__}: {exc}"})
+                rprint(f"[red]dialogue {dialogue_id} failed: {type(exc).__name__}: {exc}[/red]")
+
+            reason = halt_reason(runs, max_stragglers)
+            if reason and not force:
+                rprint(f"[red]halting: {reason}[/red]")
+                remaining = ids[ids.index(dialogue_id) + 1 :]
+                if remaining:
+                    rprint(f"[yellow]not attempted: {', '.join(remaining)}[/yellow]")
+                rprint(
+                    "Facts already reconciled are committed locally and queued IDs are in "
+                    "the outbox; rerun this command after checking HydraDB to resume."
+                )
+                break
+
+        rprint(f"[bold]done[/bold] — {len(runs)} dialogue(s) attempted, spend ${llm.spend_usd():.2f}")
+        return runs
 
     asyncio.run(_run())
 

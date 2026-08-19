@@ -105,6 +105,24 @@ Run dialogue 8 separately so a queue problem in dialogue 7 cannot hide its progr
 ./.venv/bin/palimpsest ingest 8
 ```
 
+### Adding several dialogues
+
+`ingest-all` enforces the stop conditions rather than relying on someone watching the
+output. It halts when one dialogue leaves more than `--max-stragglers` (default 5)
+sources queued, when a second dialogue queues anything at all, when a dialogue raises,
+or when the spend cap is hit. Facts already reconciled stay committed and queued IDs
+stay in the outbox, so a rerun resumes.
+
+```bash
+./.venv/bin/palimpsest ingest-all 1 2 3 4 5 6 --dry-run   # counts and current state, free
+./.venv/bin/palimpsest ingest-all 1 2                     # a pair at a time
+./.venv/bin/palimpsest verify 1                           # supersession really happened
+```
+
+Go in pairs rather than all at once: a halt then costs one pair, and the evaluation can
+run against what landed. `--force` disables the stop conditions and exists only for a
+deliberate, supervised recovery.
+
 Dialogue 8 is LLM-heavy and was previously stopped during extraction/reconciliation. The LLM wrapper now has a provider timeout. Keep the disk cache intact; reruns reuse completed extraction/classification calls.
 
 Only after 7/8 are independently checked should the full evaluation run:
