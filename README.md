@@ -27,6 +27,12 @@ model's judgment call).
   `(entity, predicate)` slots, check coverage against the graph, and abstain with a
   named missing slot when coverage is zero. We can prove absence; a vector store can't.
 
+## Live demo
+
+[Open the interactive GitHub Pages demo](https://rabbive.github.io/palimpsest/)
+
+The demo is a deterministic browser replay of verified PALIMPSEST outputs. It contains no API keys and does not make live HydraDB requests from the browser; the production write/read path remains in this repository.
+
 ## Results
 
 `make eval && make report` writes three tables into `results/`, against a provisioned
