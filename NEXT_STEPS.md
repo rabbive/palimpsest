@@ -91,9 +91,9 @@ scored in Step 6, not here.
 uv run palimpsest status
 ```
 
-Expect dialogues 7 and 8 with their current/historical counts, and **2 rows in
-`hydra_pending`** (`f_8_0001_000`, `f_8_0003_022`). Those two are known and reviewed —
-leave them alone. Do not delete or alias them.
+Expect dialogues 7 and 8 with their current/historical counts and **no rows in
+`hydra_pending`**. The two dialogue-8 facts that were previously queued were resumed
+from the outbox and now report `completed`; no recovery aliases were needed.
 
 ```bash
 uv run palimpsest verify 8
