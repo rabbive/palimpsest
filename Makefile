@@ -1,4 +1,4 @@
-.PHONY: setup spike create-db ingest setup-arm-b eval eval-smoke report demo test clean
+.PHONY: setup spike create-db ingest setup-arm-b eval eval-smoke report demo test clean clean-cache clean-eval-state
 
 setup:
 	uv sync
@@ -43,5 +43,21 @@ demo:
 test:
 	uv run pytest -q
 
+# Removes only what costs nothing to regenerate. It deliberately leaves the LLM
+# disk cache, the SQLite ledger, and the evaluation checkpoint alone -- each of
+# those costs real money or unrecoverable state to rebuild. See the two targets
+# below, which are named so you cannot destroy them by reaching for "clean".
 clean:
-	rm -rf .cache results/*.sqlite3 results/raw_eval.json results/raw_eval.jsonl
+	rm -rf .pytest_cache site/dist
+	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+
+# Drops the LLM response cache. Every extraction, reconciliation, and judge call
+# it was holding gets re-bought on the next run. Deliberate, never routine.
+clean-cache:
+	rm -rf .cache
+
+# Destroys the reconciliation record and the evaluation checkpoint: the ledger
+# holds the supersession chains and the recovery aliases, and raw_eval.jsonl is
+# what makes a run resumable. Rebuilding either means re-ingesting and re-paying.
+clean-eval-state:
+	rm -rf results/*.sqlite3 results/*.sqlite3-* results/raw_eval.json results/raw_eval.jsonl

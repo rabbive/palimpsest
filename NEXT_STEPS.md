@@ -28,7 +28,16 @@ deliberately. What remains is the video and the Google Form.
   stale on that point); extending would cost ~$27 in arm-A input alone the day before
   the deadline, and would not change the conclusion, which is structural rather than a
   sampling artefact.
-- **Step 8** — clean clone verified: 46 passed, 20 skipped. Video and Form outstanding.
+- **Step 8** — clean clone verified: 46 passed, 20 skipped. Re-verified 2026-08-21 at
+  commit `5f6b944` from a fresh `git clone` of the public repo: `uv sync` then
+  `uv run pytest -q` gives the same 46 passed, 20 skipped. Video and Form outstanding.
+- **Site** — a static GitHub Pages demo was added after the runbook was written
+  (`site/`, deployed by `.github/workflows/deploy-pages.yml`). It is a deterministic
+  browser replay of committed numbers, not a live path to HydraDB. The first push-triggered
+  deploy failed and the manual re-run succeeded, so the workflow itself is proven; the
+  published page still needs one logged-out check, same as the video link.
+- **Dialogue 8's two stragglers** were resumed from the outbox and now report
+  `completed`, so `hydra_pending` is empty (commit `850e9e3`).
 
 Total spend ~$11 of the $45 cap.
 
@@ -316,6 +325,8 @@ cat results/main_table.md results/ablation.md
 Final checklist:
 
 - [ ] Video ≤ 3:00, uploaded, link opens in a logged-out incognito window
+- [ ] `https://rabbive.github.io/palimpsest/` opens in a logged-out incognito window
+      (deploy workflow is green; the page itself is unverified from inside CI)
 - [x] `results/*.md` committed and pushed — commit `15b8df5`
 - [x] README limitations match what actually happened — dialogue count, queued facts,
       classifier error rate, the BYOG edge, and the headline result all updated
@@ -338,9 +349,13 @@ Final checklist:
 
 ## Hard rules
 
-- Never delete `results/raw_eval.jsonl` to "start clean".
+- Never delete `results/raw_eval.jsonl` to "start clean". `make clean` no longer touches
+  it, the ledger, or the LLM cache — those need `make clean-eval-state` / `make clean-cache`,
+  named that way on purpose.
 - Never pass `--ingest` to the evaluation for dialogues 7 or 8; they are already ingested.
-- Never delete or alias `f_8_0001_000` / `f_8_0003_022` without explicit review.
+- Never delete or alias a queued source ID without explicit review. (`f_8_0001_000` and
+  `f_8_0003_022`, the two that prompted this rule, have since been resumed and report
+  `completed`; the rule stands for the next one.)
 - Never delete remote memories to recover from an indexing incident.
 - Add dialogues in pairs through `ingest-all`, never all at once.
 
