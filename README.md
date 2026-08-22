@@ -35,7 +35,7 @@ The demo is a deterministic browser replay of verified PALIMPSEST outputs. It co
 
 ## Results
 
-`make eval && make report` writes three tables into `results/`, against a provisioned
+`make eval && make report` writes four tables into `results/`, against a provisioned
 HydraDB database and a live LLM key:
 
 | File | Contents |
