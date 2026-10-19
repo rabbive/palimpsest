@@ -45,15 +45,20 @@ and disclose that in their own coverage lines.
   earlier claim that it returns the expected `SUPERSEDES` edge no longer holds. The
   `cursor=0` wrapper fix is still in place and is not the cause. Checked across both
   dialogues, `type="memory"` and `"knowledge"`, with and without a collection, and
-  with and without an `id`; the whole `palimpsest` database has no relations. Ingest
-  responses report `relations_created=None` and `relations_error=None` — neither a
-  count nor an error. The same call against `palimpsest_arm_b`, ingested with
-  `infer=True`, returns 21 relations for dialogue 7 and 16 for dialogue 8, so the
-  server's graph works and the supplied BYOG `graph_payload` is being silently ignored
-  on `infer=False` ingests. Reproduced on a throwaway collection with a synthetic
+  with and without an `id`; the whole `palimpsest` database has no relations.
+  Ingest responses report `relations_created=None` and `relations_error=None`, but
+  OpenAPI documents both as "type=knowledge only", so that is expected for memory
+  ingests and is not evidence either way. The same call against `palimpsest_arm_b`,
+  ingested with `infer=True`, returns 21 relations for dialogue 7 and 16 for
+  dialogue 8, so `context.relations()` works for HydraDB-extracted graphs. The
+  zero-relations observation comes from `context.relations()` only; a `/query`
+  `graph_context` readback has not been tried, so it is open whether the supplied BYOG
+  `graph_payload` is ignored on `infer=False` ingests or only not listed by
+  `context.relations()`. Reproduced on a throwaway collection with a synthetic
   supersession pair, so this is not damage to the real corpus. Not fixed: the fix
   would be a re-ingest of both dialogues, which feature freeze and the queue-exposure
-  rule both rule out. Documented in the README limitations instead.
+  rule both rule out. Payload shape checked against the docs and a repro written:
+  see `docs/hydradb-byog-finding.md`. Documented in the README limitations.
 - `palimpsest ask 8 "What is my current manager?"` returns a structured abstention naming `user / MANAGES`.
 
 ## What happened

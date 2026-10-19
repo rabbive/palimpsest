@@ -211,23 +211,28 @@ than spending arm A and arm C budget on questions arm B cannot answer.
   SUPERSESSION / CONTRADICTION boundary, which is the genuinely hard call: pairs
   testing it are marked `hard` and kept in the set deliberately. A known error rate
   beats a hidden one.
-- **The BYOG graph edges cannot be read back.** The write path sends a
-  `graph_payload` with every fact, and HydraDB accepts it — the ingest response
-  reports `relations_created=None` and `relations_error=None`, i.e. neither a count
-  nor an error. But `context.relations()` returns zero relations for every source in
-  the arm-C database, on every read shape tried (`type="memory"` and `"knowledge"`,
-  with and without a collection, with and without an `id`). The same call against the
-  arm-B database, whose sources were ingested with `infer=True` and went through the
+- **The BYOG graph edges cannot be read back through `context.relations()`.** The
+  write path sends a `graph_payload` with every fact, and HydraDB accepts it without
+  error. `context.relations()` returns zero relations for every source in the arm-C
+  database, on every read shape tried (`type="memory"` and `"knowledge"`, with and
+  without a collection, with and without an `id`). The same call against the arm-B
+  database, whose sources were ingested with `infer=True` and went through the
   server's own `graph_creation` stage, returns 21 relations for dialogue 7 and 16 for
-  dialogue 8. So the graph machinery works; the supplied `graph_payload` is silently
-  ignored on `infer=False` memory ingests. Reproduced on a fresh throwaway collection,
-  so it is not corpus damage. **Consequence:** the supersession edge is a claim this
+  dialogue 8. The ingest response shows `relations_created=None` and
+  `relations_error=None`, but HydraDB's OpenAPI spec documents both fields as
+  "type=knowledge only", so `None` on a memory ingest is expected and says nothing
+  either way. The zero-relations observation comes from `context.relations()` alone.
+  We have not yet read the edges back through `/query` `graph_context`, where the
+  docs say BYOG edges appear with `origin: "byog"`, so it is open whether the edges
+  are missing or only missing from `context.relations()`. Our payload matches the
+  documented shape. See [`docs/hydradb-byog-finding.md`](docs/hydradb-byog-finding.md)
+  for the shape check, the repro script (`scripts/repro_byog_infer_false.py`) and the
+  questions for HydraDB. **Consequence:** the supersession edge is a claim this
   project makes in its write path and cannot currently demonstrate through HydraDB's
-  read path. The current-view contract that `verify` proves does not depend on it — it
-  rests on schema-declared `status` metadata filtering, which does work — and neither
-  does any answer path, since `query_paths` provenance and the SQLite ledger carry the
-  chain. Untangling whether this is a payload-shape mismatch or a server-side gap was
-  out of scope under feature freeze.
+  `context.relations()`. The current-view contract that `verify` proves does not
+  depend on it — it rests on schema-declared `status` metadata filtering, which does
+  work — and neither does any answer path, since `query_paths` provenance and the
+  SQLite ledger carry the chain.
 - Eval subset is 8/20 100K dialogues, not the full bucket (see above).
 - No traversal query language in HydraDB means chain-walking and the inspector UI
   read from a local SQLite mirror, not the store itself — stated plainly rather than
