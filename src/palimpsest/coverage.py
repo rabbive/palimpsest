@@ -1,16 +1,34 @@
 """Slot decomposition + premise/coverage check.
 
-Abstention is a graph property: decompose the question into required
-(entity, predicate) slots, check whether the store holds ANY fact about each slot.
-Stored facts all have subject "user" and a coarse predicate, so the check retrieves
-unfiltered and a cheap model verifies the nearest facts are about the slot. No fact
-about a required slot -> abstain and name it. This is the thing a vector store
-cannot do (it always returns top-k, never "absent").
+Decompose the question into required (entity, predicate) slots, then check whether
+the store holds ANY fact about each slot. Stored facts all have subject "user" and a
+coarse predicate, so the check retrieves the top 5 from HydraDB with no metadata
+filter and a cheap model verifies whether any of them is about the slot. If none is,
+the system abstains and names the missing slot. A plain top-k retriever has no
+"absent" signal of its own; this check supplies one.
 """
+
+import logging
+import threading
 
 from palimpsest import config, hydra, llm
 from palimpsest.models import Abstention
 from palimpsest.vocab import PREDICATES
+
+log = logging.getLogger(__name__)
+
+# Times the verifier failed open. Eval runs items in threads (one event loop each), so
+# this is a threading.Lock, not asyncio.
+FAIL_OPEN_COUNT = 0
+_fail_open_lock = threading.Lock()
+
+
+def _record_fail_open(reason: str) -> None:
+    global FAIL_OPEN_COUNT
+    with _fail_open_lock:
+        FAIL_OPEN_COUNT += 1
+    log.warning("coverage verifier failed open: %s", reason)
+
 
 DECOMPOSE_SYSTEM = """Decompose the QUESTION into the minimal set of (entity, predicate) \
 memory slots that MUST be filled for the question to be answerable at all. `entity` is \
@@ -61,8 +79,12 @@ def _evidence_covers_slot(entity: str, predicate: str, evidence: list[str], mode
             model=model,
         )
     except ValueError:  # JSONDecodeError on empty/prose reply; timeouts and budget errors still propagate
+        _record_fail_open("unparseable verifier reply")
         return True
-    return data.get("covered") is not False if isinstance(data, dict) else True
+    if not isinstance(data, dict):
+        _record_fail_open(f"non-dict verifier reply ({type(data).__name__})")
+        return True
+    return data.get("covered") is not False
 
 
 async def slot_has_coverage(

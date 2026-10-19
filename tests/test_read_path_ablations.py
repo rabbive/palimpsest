@@ -103,3 +103,17 @@ def test_provenance_stays_the_raw_chunk_content(spy):
     _Chunk.metadata = {"session_idx": 3}
     answer = asyncio.run(read_path.answer_question("7", "who is my manager?", use_coverage=False))
     assert answer.provenance == ["user reports to priya raghavan."]
+
+
+def test_ordering_context_has_query_paths_and_session_prefixed_chunks(spy, monkeypatch):
+    class _GC:
+        query_paths = ["user lives in bangalore SUPERSEDES chennai"]
+
+    monkeypatch.setattr(_Data, "graph_context", _GC(), raising=False)
+    monkeypatch.setattr(read_path, "classify_intent", lambda question, model=None: "ORDERING")
+    _Chunk.metadata = {"session_idx": 4}
+    asyncio.run(read_path.answer_question("8", "which came first?", use_coverage=False))
+    prompt = spy["prompts"][0]
+    assert "- user lives in bangalore SUPERSEDES chennai" in prompt
+    assert "(session 4) user reports to priya raghavan." in prompt
+    assert prompt.index("SUPERSEDES") < prompt.index("(session 4)")

@@ -119,3 +119,22 @@ def test_abstention_still_names_the_missing_slot(spy, monkeypatch):
     spy["chunks"] = []
     ab = asyncio.run(coverage.check_premise("8", "What is my dog's name?"))
     assert ab.missing_slots == ["my dog / HAS_PET"]
+
+
+def test_fail_open_increments_counter_on_both_paths(spy, monkeypatch):
+    before = coverage.FAIL_OPEN_COUNT
+
+    def raises(**kwargs):
+        raise ValueError("not json")
+
+    monkeypatch.setattr(coverage.llm, "complete_json", raises)
+    assert coverage._evidence_covers_slot("user", "OTHER", ["f"], "m") is True
+    assert coverage.FAIL_OPEN_COUNT == before + 1
+
+    monkeypatch.setattr(coverage.llm, "complete_json", lambda **kw: ["not", "a", "dict"])
+    assert coverage._evidence_covers_slot("user", "OTHER", ["f"], "m") is True
+    assert coverage.FAIL_OPEN_COUNT == before + 2
+
+    monkeypatch.setattr(coverage.llm, "complete_json", lambda **kw: {"covered": False})
+    assert coverage._evidence_covers_slot("user", "OTHER", ["f"], "m") is False
+    assert coverage.FAIL_OPEN_COUNT == before + 2

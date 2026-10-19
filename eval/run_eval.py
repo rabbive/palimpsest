@@ -33,7 +33,7 @@ import typer
 
 from eval.beam_loader import FROZEN_SUBSET, PRIORITY_CATEGORIES, iter_questions, iter_sessions
 from eval.judge import judge_question
-from palimpsest import config, hydra, llm
+from palimpsest import config, coverage, hydra, llm
 from palimpsest.models import EvalResult
 from palimpsest.read_path import answer_question
 from palimpsest.write_path import process_dialogue
@@ -438,6 +438,7 @@ def main(
     errors = sum(1 for r in results if r.get("error"))
     typer.echo(f"wrote {len(results)} eval results to {out} ({errors} errored)")
     typer.echo(f"LLM usage: {llm.usage_summary()}")
+    typer.echo(f"coverage verifier fail-opens: {coverage.FAIL_OPEN_COUNT}")
 
 
 if __name__ == "__main__":

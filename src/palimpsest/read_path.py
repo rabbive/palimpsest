@@ -131,7 +131,7 @@ async def _answer(
         query_paths = [str(p) for p in result.data.graph_context.query_paths]
 
     if intent == "ORDERING":
-        context_block = "\n".join(f"- {p}" for p in query_paths) or "\n".join(chunk_lines)
+        context_block = "\n".join([f"- {p}" for p in query_paths] + chunk_lines)
     else:
         context_block = "\n".join(chunk_lines)
 
