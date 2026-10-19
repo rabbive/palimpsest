@@ -21,8 +21,8 @@ STRONG_MODEL = os.environ.get("PALIMPSEST_STRONG_MODEL", "gpt-5.5")
 EMBEDDINGS_DIMENSION = 1536
 
 RESULTS_DIR = ROOT / "results"
-LEDGER_PATH = str(RESULTS_DIR / "ledger.sqlite3")
-CACHE_DIR = str(ROOT / ".cache")
+LEDGER_PATH = os.environ.get("PALIMPSEST_LEDGER_PATH", str(RESULTS_DIR / "ledger.sqlite3"))
+CACHE_DIR = os.environ.get("PALIMPSEST_CACHE_DIR", str(ROOT / ".cache"))
 
 
 def ensure_dirs() -> None:

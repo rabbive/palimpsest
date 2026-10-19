@@ -1,7 +1,7 @@
 [project]
 name = "palimpsest"
 version = "0.1.0"
-description = "Add your description here"
+description = "Write-time reconciliation and abstention layer for HydraDB memory"
 requires-python = ">=3.11"
 dependencies = [
     "diskcache>=5.6.3",

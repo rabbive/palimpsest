@@ -159,6 +159,18 @@ def supersession_chain(conn: sqlite3.Connection, fact_id: str) -> list[Fact]:
     return chain
 
 
+def next_session_idx(conn: sqlite3.Connection, dialogue_id: str) -> int:
+    """Next unused session index: MAX(session_idx)+1, or 0 for a new dialogue.
+
+    A session that yielded zero facts leaves no row, so it does not advance
+    the index. That is fine: no fact IDs exist for it, so nothing can collide.
+    """
+    row = conn.execute(
+        "SELECT MAX(session_idx) FROM facts WHERE dialogue_id = ?", (dialogue_id,)
+    ).fetchone()
+    return 0 if row[0] is None else row[0] + 1
+
+
 def all_facts(conn: sqlite3.Connection, dialogue_id: str) -> list[Fact]:
     rows = conn.execute(
         "SELECT * FROM facts WHERE dialogue_id = ? ORDER BY session_idx ASC", (dialogue_id,)
