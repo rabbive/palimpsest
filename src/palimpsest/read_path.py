@@ -35,13 +35,30 @@ Return ONLY {"intent": "CURRENT"|"AS_OF"|"ORDERING"|"AGGREGATE"}.
 
 ANSWER_SYSTEM = """Answer the QUESTION using ONLY the provided CONTEXT (retrieved memory \
 chunks and graph traversal paths). If the context is insufficient, say so plainly. Cite \
-which fact(s) you used implicitly by staying close to their wording. Be concise."""
+which fact(s) you used implicitly by staying close to their wording. Be concise. \
+Lines prefixed (session N) come from the Nth conversation session; higher N is later."""
 
 
 def classify_intent(question: str, model: str = config.CHEAP_MODEL) -> str:
     data = llm.complete_json(prompt=f"QUESTION: {question}", system=INTENT_SYSTEM, model=model)
     intent = data.get("intent", "CURRENT") if isinstance(data, dict) else "CURRENT"
     return intent if intent in ("CURRENT", "AS_OF", "ORDERING", "AGGREGATE") else "CURRENT"
+
+
+def _chunk_line(chunk) -> str:
+    """The chunk's content, prefixed "(session N) " when it carries a session_idx.
+
+    Memory text has no time position of its own; session_idx is schema metadata
+    set at write time. Reads ``metadata`` first, then ``additional_metadata``.
+    Which of the two HydraDB actually returns it in is unverified live (HydraDB
+    access was blocked on 2026-10-19), hence the fallback.
+    """
+    content = chunk.chunk_content
+    for field in ("metadata", "additional_metadata"):
+        meta = getattr(chunk, field, None)
+        if isinstance(meta, dict) and "session_idx" in meta:
+            return f"(session {meta['session_idx']}) {content}"
+    return content
 
 
 def _metadata_filters_for_intent(intent: str) -> dict | None:
@@ -105,16 +122,18 @@ async def _answer(
     )
 
     chunks = result.data.chunks or []
-    chunk_texts = [c.chunk_content for c in chunks if getattr(c, "chunk_content", None)]
+    live = [c for c in chunks if getattr(c, "chunk_content", None)]
+    chunk_texts = [c.chunk_content for c in live]  # raw, for provenance
+    chunk_lines = [_chunk_line(c) for c in live]  # session-prefixed, for the model
 
     query_paths = []
     if result.data.graph_context and result.data.graph_context.query_paths:
         query_paths = [str(p) for p in result.data.graph_context.query_paths]
 
     if intent == "ORDERING":
-        context_block = "\n".join(f"- {p}" for p in query_paths) or "\n".join(chunk_texts)
+        context_block = "\n".join(f"- {p}" for p in query_paths) or "\n".join(chunk_lines)
     else:
-        context_block = "\n".join(chunk_texts)
+        context_block = "\n".join(chunk_lines)
 
     if not context_block.strip():
         ab = Abstention(missing_slots=["<no matching context>"], reason="Retrieval returned no chunks for this question")
