@@ -7,6 +7,7 @@ answer path, only on the write path and by tooling.
 
 import sqlite3
 from contextlib import contextmanager
+from pathlib import Path
 
 from palimpsest import config
 from palimpsest.models import Fact
@@ -44,10 +45,13 @@ CREATE TABLE IF NOT EXISTS hydra_source_aliases (
 
 
 @contextmanager
-def connect(path: str = config.LEDGER_PATH):
-    # A clean clone has no results/ directory (it is gitignored), and sqlite3
-    # will not create the parent for us.
-    config.ensure_dirs()
+def connect(path: str | None = None):
+    # The path is resolved at call time, so Memory and the write path always
+    # share one ledger even if config.LEDGER_PATH changes after import.
+    path = path or config.LEDGER_PATH
+    # sqlite3 will not create the parent directory. Create only that one: an
+    # installed library must not write to ROOT/results (inside site-packages).
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     try:

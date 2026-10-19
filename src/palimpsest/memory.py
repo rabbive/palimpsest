@@ -1,7 +1,7 @@
 """Library facade: one end user's memory on top of HydraDB."""
 import asyncio
 
-from palimpsest import config, ledger
+from palimpsest import ledger
 from palimpsest.models import Answer, Fact
 from palimpsest.read_path import answer_question
 from palimpsest.write_path import process_dialogue
@@ -24,11 +24,12 @@ class Memory:
 
         The instance lock is held from reading the next session index until the
         write returns, so concurrent calls get distinct indexes (fact IDs embed
-        the index; a collision would silently skip facts). It does not protect
-        against two processes writing to one collection.
+        the index; a collision would silently skip facts). The lock is per
+        instance (and per event loop): two Memory objects for one collection,
+        or two processes writing to it, are not protected.
         """
         async with self._lock:
-            with ledger.connect(config.LEDGER_PATH) as conn:
+            with ledger.connect() as conn:
                 idx = ledger.next_session_idx(conn, self.collection)
             return await process_dialogue(self.collection, [(idx, timestamp, text)])
 
@@ -37,5 +38,5 @@ class Memory:
 
     def history(self) -> list[Fact]:
         """Every ledger fact, superseded ones included. Inspection only; never used to answer."""
-        with ledger.connect(config.LEDGER_PATH) as conn:
+        with ledger.connect() as conn:
             return ledger.all_facts(conn, self.collection)

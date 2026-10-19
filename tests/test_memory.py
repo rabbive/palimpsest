@@ -22,7 +22,7 @@ def fake_write(monkeypatch, mem):
         # without the lock both would read the same next_session_idx.
         await asyncio.sleep(0)
         seen["sessions"].append(sessions)
-        with ledger.connect(config.LEDGER_PATH) as conn:
+        with ledger.connect() as conn:
             for idx, ts, text in sessions:
                 ledger.insert_fact(conn, Fact(
                     id=f"f_{dialogue_id}_{idx:04d}_000", dialogue_id=dialogue_id,
@@ -81,3 +81,23 @@ def test_ledger_path_is_env_overridable(monkeypatch, tmp_path):
     finally:
         monkeypatch.undo()
         importlib.reload(config)
+
+
+def test_writer_and_memory_share_the_ledger(mem, tmp_path):
+    # ledger.connect() is what the real process_dialogue calls with no argument.
+    with ledger.connect() as conn:
+        ledger.insert_fact(conn, Fact(
+            id="f_alice_0000_000", dialogue_id="alice", session_idx=0, subject="user",
+            predicate="lives_in", object="Chennai", source_span="x"))
+    assert (tmp_path / "ledger.sqlite3").exists()
+    assert [f.id for f in mem.history()] == ["f_alice_0000_000"]
+
+
+def test_connect_creates_only_the_ledger_parent(monkeypatch, tmp_path):
+    results = tmp_path / "results"
+    monkeypatch.setattr(config, "RESULTS_DIR", results)
+    monkeypatch.setattr(config, "LEDGER_PATH", str(tmp_path / "new" / "sub" / "l.sqlite3"))
+    with ledger.connect():
+        pass
+    assert (tmp_path / "new" / "sub" / "l.sqlite3").exists()
+    assert not results.exists()
