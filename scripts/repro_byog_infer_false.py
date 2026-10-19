@@ -52,8 +52,12 @@ async def run_one(collection: str, infer: bool, graph: dict | None, memories: li
     print("ingest response (as returned):")
     print(json.dumps(_dump(resp), indent=2, default=str))
     print("Note: relations_created / relations_error are documented as type=knowledge only.")
-    stragglers = await hydra.wait_for_indexed([ID_A, ID_B], collection, max_stragglers=2)
-    print("indexed; stragglers:", sorted(stragglers))
+    # wait_for_indexed also returns early with the unfinished ids on a status-call
+    # timeout, so check the result explicitly. Never read back unindexed sources.
+    stragglers = await hydra.wait_for_indexed([ID_A, ID_B], collection, max_stragglers=0)
+    if stragglers:
+        raise RuntimeError(f"not indexed in {collection}: {sorted(stragglers)}; no read-back done")
+    print("indexed: both memories")
 
     rel = _dump(await hydra.relations(collection=collection))
     rows = (rel.get("data") or rel).get("relations") or []

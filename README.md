@@ -58,7 +58,8 @@ to a different write pass:
   still sent and the metadata is still flipped; the reader just stops enforcing it.
   This is precisely the read-time reconciliation this project argues against, so it is
   the number that tests claim 1. (What the arm actually varies is the metadata filter,
-  which is just as well given the edges turn out not to be readable — see the BYOG
+  which is just as well given the edges were not readable back through
+  `context.relations()`, and a query `graph_context` read-back is untested — see the BYOG
   limitation below.)
 - `C_no_coverage` — graph-property abstention off, testing claim 2.
 - `C_neither` — both off.
@@ -130,8 +131,9 @@ The result is reported as measured; no arm was retuned after seeing it.
   resolved.
 - BYOG `graph_payload`: every fact is sent with its own subject/object entities and a
   `REFINES` / `SUPERSEDES` / `CONTRADICTS` edge back to the fact it replaces, with
-  `temporal_details` naming the session it happened at. **These edges are not
-  readable back out** — see the BYOG limitation below.
+  `temporal_details` naming the session it happened at. **These edges were not
+  readable back through `context.relations()`; a query `graph_context` read-back is
+  untested** — see the BYOG limitation below.
 - Schema-declared `status` metadata (declared at `databases.create` time, per the
   SDK's hard constraint that `metadata_filters` only works on schema-declared
   fields) → deterministic current-view filtering on every read.
