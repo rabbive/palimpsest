@@ -12,7 +12,7 @@ possible without a second ingestion pass:
     behavior this project argues against.
 
 ``use_coverage``
-    Off, the graph-property premise check is skipped, so the system can no longer
+    Off, the slot premise check is skipped, so the system can no longer
     abstain by naming a missing slot. Retrieval returning nothing at all is still
     handled: that is a plain RAG failure mode, not the mechanism being ablated,
     and leaving it in keeps the comparison about the premise check itself.

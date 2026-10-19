@@ -27,7 +27,7 @@ ARM_LABELS = {
     "B": "B: HydraDB default (infer=True)",
     "C": "C: PALIMPSEST",
     "C_no_status_filter": "C − materialized current view",
-    "C_no_coverage": "C − graph-property abstention",
+    "C_no_coverage": "C − slot-based abstention",
     "C_neither": "C − both",
 }
 

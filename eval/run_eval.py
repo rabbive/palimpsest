@@ -12,7 +12,7 @@ Three ablations run on the same ingested corpus as arm C, switching off one read
 path mechanism each — no second write pass, so they cost queries and nothing else:
 
     C_no_status_filter  materialized current view off
-    C_no_coverage       graph-property abstention off
+    C_no_coverage       slot-based abstention off
     C_neither           both off
 
 Operationally this harness is built around one lesson: the first full run was a

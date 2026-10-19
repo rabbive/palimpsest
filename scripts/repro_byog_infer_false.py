@@ -59,15 +59,19 @@ async def run_one(collection: str, infer: bool, graph: dict | None, memories: li
         raise RuntimeError(f"not indexed in {collection}: {sorted(stragglers)}; no read-back done")
     print("indexed: both memories")
 
+    # Print the whole response (success, data, ...) so `data: null` is visible and is
+    # not read as "0 relations".
     rel = _dump(await hydra.relations(collection=collection))
-    rows = (rel.get("data") or rel).get("relations") or []
+    print("context.relations() full response:")
+    print(json.dumps(rel, indent=2, default=str))
+    rows = (rel.get("data") or {}).get("relations") or []
     print(f"context.relations(): {len(rows)} relations")
-    print(json.dumps(rows, indent=2, default=str))
 
     q = _dump(await hydra.query(q=QUESTION, collection=collection, graph_context=True))
-    gc = (q.get("data") or q).get("graph_context")
-    print("query graph_context:")
+    print("query graph_context (null here means absent from the response):")
+    gc = (q.get("data") or {}).get("graph_context")
     print(json.dumps(gc, indent=2, default=str))
+    print("query response success:", q.get("success"), "| data is null:", q.get("data") is None)
     print("any element with origin == 'byog':", _has_byog(gc))
 
 

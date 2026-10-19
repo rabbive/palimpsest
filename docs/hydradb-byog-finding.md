@@ -21,23 +21,66 @@ Sources:
 - OpenAPI spec, `POST /context/ingest` and `ingestion.V2IngestResultItem`: https://docs.hydradb.com/api-reference/v2/openapi.json
 - Installed SDK `hydradb-sdk` 2.1.2: `hydra_db/context/client.py` (`ingest`), `hydra_db/types/ingestion_v2source_upload_result_item.py`. The SDK types `graph_payload` as a plain `str` and says nothing more. Its docstring for `relations_created` ("Number of graph relations extracted from this file") also omits the OpenAPI caveat "type=knowledge only", which is a likely source of our earlier misreading.
 
-Our payload is built by `write_path._byog_payload` and sent by `hydra.ingest_facts` as `context.ingest(type="memory", upsert="true", memories=json.dumps(...), graph_payload=json.dumps(...))`. Printed from the ledger for fact `f_8_0001_007`, a supersession of `f_8_0000_003` (no network calls):
+Our payload is built by `write_path._byog_payload` and sent by `hydra.ingest_facts` as `context.ingest(type="memory", upsert="true", memories=json.dumps(...), graph_payload=json.dumps(...))`. Printed offline by `build_payloads()` in `scripts/repro_byog_infer_false.py`, for a synthetic pair: "user lives in chennai." (`mem-a`) superseded by "user lives in bangalore." (`mem-b`). No network calls:
 
 ```json
 {
-  "f_8_0001_007": {
+  "mem-a": {
     "entities": {
-      "subject":      {"name": "user", "type": "ENTITY", "namespace": "palimpsest"},
-      "object":       {"name": "$120 on grammarly premium", "type": "ENTITY", "namespace": "palimpsest"},
-      "prior_object": {"name": "$75,000 annually", "type": "ENTITY", "namespace": "palimpsest"}
+      "subject": {
+        "name": "user",
+        "type": "ENTITY",
+        "namespace": "palimpsest"
+      },
+      "object": {
+        "name": "chennai",
+        "type": "ENTITY",
+        "namespace": "palimpsest"
+      }
     },
     "relations": [
-      {"source": "subject", "target": "object", "predicate": "SPENT_AMOUNT",
-       "context": "I spent on Grammarly Premium on April 7",
-       "temporal_details": "dialogue 8, session 1, April-12-2024"},
-      {"source": "object", "target": "prior_object", "predicate": "SUPERSEDES",
-       "context": "supersedes fact f_8_0000_003 at session 1",
-       "temporal_details": "supersedes f_8_0000_003 at session 1"}
+      {
+        "source": "subject",
+        "target": "object",
+        "predicate": "LIVES_IN",
+        "context": "user lives in chennai.",
+        "temporal_details": "dialogue repro, session 0"
+      }
+    ]
+  },
+  "mem-b": {
+    "entities": {
+      "subject": {
+        "name": "user",
+        "type": "ENTITY",
+        "namespace": "palimpsest"
+      },
+      "object": {
+        "name": "bangalore",
+        "type": "ENTITY",
+        "namespace": "palimpsest"
+      },
+      "prior_object": {
+        "name": "chennai",
+        "type": "ENTITY",
+        "namespace": "palimpsest"
+      }
+    },
+    "relations": [
+      {
+        "source": "subject",
+        "target": "object",
+        "predicate": "LIVES_IN",
+        "context": "user lives in bangalore.",
+        "temporal_details": "dialogue repro, session 0"
+      },
+      {
+        "source": "object",
+        "target": "prior_object",
+        "predicate": "SUPERSEDES",
+        "context": "supersedes fact mem-a at session 0",
+        "temporal_details": "supersedes mem-a at session 0"
+      }
     ]
   }
 }
@@ -127,7 +170,7 @@ What this does and does not show. The zero-relation result comes from `context.r
 2. HydraDB ignores `graph_payload` when `infer=False`. Then that needs documenting, or fixing.
 3. HydraDB drops a graph it cannot attach to a memory chunk, with no signal in the response.
 
-The repro separates these.
+The repro distinguishes outcome 1 from outcomes 2 and 3: whether the edges are readable through `/query` `graph_context`. It does not tell outcome 2 from outcome 3. That needs HydraDB.
 
 ## Repro command
 
@@ -139,8 +182,12 @@ It needs `HYDRADB_API_KEY` in the environment or `.env`, and uses the database i
 
 - prints the ingest response as returned;
 - waits for both memories to index;
-- prints `context.relations()` output and its count;
-- runs `/query` ("where does the user live", `graph_context=True`), prints the `graph_context`, and says whether any element has `origin == "byog"`.
+- prints the full `context.relations()` response, including `success` and `data`, so `data: null` is not mistaken for 0 relations, and the row count;
+- runs `/query` ("where does the user live", `graph_context=True`), prints the `graph_context` (and whether the response is `success` with non-null `data`), and says whether any element has `origin == "byog"`.
+
+Read the printed `graph_context` yourself. The `origin == "byog"` check only flags edges that carry an `origin` key, so edges without one are not flagged.
+
+Rerun rule: the readback happens once, right after indexing. If the `infer=True` control also shows 0 relations, rerun the readback after a minute before concluding anything, because graph work can lag the "completed" status.
 
 It exits with status 1 and a message on any HydraDB error, for example HTTP 402. It never prints the API key.
 
@@ -150,13 +197,13 @@ Pending: HydraDB access (HTTP 402 on 2026-10-19). Run the command above and past
 
 ## What PALIMPSEST does instead
 
-The BYOG edges are best-effort in this project. Nothing that answers a question depends on them:
+The BYOG edges are best-effort in this project. Current-view correctness does not depend on them:
 
 - The current view comes from a schema-declared `status` metadata field (`current` or `historical`). The write path flips it when a fact is superseded, and reads use HydraDB's hard `metadata_filters={"status": "current"}`. `palimpsest verify` proves this against the live store.
 - The supersession chain lives in the local SQLite ledger (`results/ledger.sqlite3`). The timeline inspector and chain walking read from it.
-- No answer path depends on the edges. Provenance comes from `query_paths` in HydraDB's response and from the ledger.
+- ORDERING answers read `graph_context.query_paths`, which is where BYOG edges would appear if HydraDB returned them. So ORDERING would use them if present. Other answers, and current-view correctness, do not use them. Provenance also comes from the ledger.
 
-If `graph_payload` does work on `infer=False` memories, we would also get the edges in HydraDB's own read path. That is the only thing we lose today.
+If `graph_payload` does work on `infer=False` memories, the edges would also show up in `query_paths`, and ORDERING answers would pick them up.
 
 ## Open questions for HydraDB
 

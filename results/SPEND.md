@@ -11,6 +11,7 @@
 - Strong model: the user picked Opus 5.5. `claude-opus-5-5` returns `model_not_found` on this proxy, so the strong model is pending the user.
 - Prices are pending the user. The meter uses the old defaults, so reported spend is approximate.
 - Each proxy call carries about 4.4K mostly-cached prompt tokens of proxy overhead.
+- From 2026-10-19 the user's instruction: gpt-5.6 for both cheap and strong (and therefore judge) until Opus 5.5 access is sorted out.
 
 ## Starting state 2026-10-19
 

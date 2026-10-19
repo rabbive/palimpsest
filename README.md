@@ -13,8 +13,8 @@ top-k, so its floor is "least-bad match", never "absent" — it cannot say it do
 know something.
 
 PALIMPSEST is the layer HydraDB deliberately does not ship: supersession resolved
-at write time (not re-derived per query), and abstention as a graph property (not a
-model's judgment call).
+at write time (not re-derived per query), and abstention by naming the missing slot
+(checked against the stored facts through retrieval and a verifier).
 
 ## What we built
 
@@ -23,9 +23,11 @@ model's judgment call).
   written, and flips superseded facts' `status` metadata to `historical` immediately.
 - **Materialized current view** — `metadata_filters={"status": "current"}` is a hard,
   deterministic filter on HydraDB's own query path. No re-ranking, no re-deriving.
-- **Graph-property abstention** — decompose a question into required
-  `(entity, predicate)` slots, check coverage against the graph, and abstain with a
-  named missing slot when coverage is zero. We can prove absence; a vector store can't.
+- **Slot-based abstention** — decompose a question into required
+  `(entity, predicate)` slots and check the stored facts through HydraDB retrieval (top 5,
+  no metadata filter) plus a cheap-model verifier that judges whether any retrieved fact
+  is about the slot. If none is, abstain and name the missing slot. A plain top-k
+  retriever has no "absent" signal of its own.
 
 ## Live demo
 
@@ -61,7 +63,7 @@ to a different write pass:
   which is just as well given the edges were not readable back through
   `context.relations()`, and a query `graph_context` read-back is untested — see the BYOG
   limitation below.)
-- `C_no_coverage` — graph-property abstention off, testing claim 2.
+- `C_no_coverage` — slot-based abstention off, testing claim 2.
 - `C_neither` — both off.
 
 **Abstention is reported in both directions.** Abstaining on BEAM's abstention questions
@@ -143,7 +145,7 @@ The result is reported as measured; no arm was retuned after seeing it.
   filter above all — without it we'd be re-deriving "what's current" from the SQLite
   ledger on every read, which is exactly the read-time reconciliation this project
   argues against. The persisted graph was meant to carry the same weight, but on the
-  evidence below we never got our own edges back out of it.
+  evidence below we never got our own edges back out of it through `context.relations()` (query `graph_context` read-back untested).
 
 ## Architecture
 
@@ -233,8 +235,8 @@ than spending arm A and arm C budget on questions arm B cannot answer.
   project makes in its write path and cannot currently demonstrate through HydraDB's
   `context.relations()`. The current-view contract that `verify` proves does not
   depend on it — it rests on schema-declared `status` metadata filtering, which does
-  work — and neither does any answer path, since `query_paths` provenance and the
-  SQLite ledger carry the chain.
+  work. ORDERING answers do read `graph_context.query_paths`, which is where BYOG edges
+  would appear if HydraDB returned them, so ORDERING would use them if present.
 - Eval subset is 8/20 100K dialogues, not the full bucket (see above).
 - No traversal query language in HydraDB means chain-walking and the inspector UI
   read from a local SQLite mirror, not the store itself — stated plainly rather than

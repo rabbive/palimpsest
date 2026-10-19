@@ -145,3 +145,7 @@ README says so. There is no second held-out run after a code change.
 Live runs are currently blocked by HydraDB (HTTP 402, free plan deprecated). This
 protocol takes effect whenever runs resume. The freeze tag is created only immediately
 before the held-out run.
+
+Amendment (fixes): the session-position fix (fix 2) also applies to ORDERING context, which is now the `query_paths` lines followed by the session-prefixed chunk lines; decided before any dev measurement.
+
+Amendment (success criterion): "0 errored rows" applies to every held-out arm that is compared (B, C, C_no_coverage, C_no_status_filter).
