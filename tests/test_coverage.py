@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -82,10 +83,28 @@ def test_no_chunks_is_uncovered_without_an_llm_call(spy):
     assert spy["verifier_calls"] == 0
 
 
-def test_malformed_verifier_output_fails_open(spy):
+def test_non_dict_verifier_output_fails_open(spy):
     spy["chunks"] = ["user has pet rex."]
     spy["verdict"] = "not json"
     assert asyncio.run(coverage.slot_has_coverage("8", "my dog", "HAS_PET"))[0] is True
+
+
+def test_unparseable_verifier_reply_fails_open(spy, monkeypatch):
+    # the real llm.complete_json raises JSONDecodeError on empty or prose-only output
+    def raising(**kwargs):
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    monkeypatch.setattr(coverage.llm, "complete_json", raising)
+    assert asyncio.run(coverage.slot_has_coverage("8", "my dog", "HAS_PET"))[0] is True
+
+
+def test_verifier_timeout_propagates(spy, monkeypatch):
+    def raising(**kwargs):
+        raise TimeoutError()
+
+    monkeypatch.setattr(coverage.llm, "complete_json", raising)
+    with pytest.raises(TimeoutError):
+        asyncio.run(coverage.slot_has_coverage("8", "my dog", "HAS_PET"))
 
 
 def test_hydra_timeout_propagates_instead_of_abstaining(spy, monkeypatch):

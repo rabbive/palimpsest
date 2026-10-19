@@ -54,11 +54,14 @@ def _evidence_covers_slot(entity: str, predicate: str, evidence: list[str], mode
     """Fail open: anything but an explicit covered=false counts as covered, so a verifier
     glitch answers the question instead of abstaining."""
     facts = "\n".join(f"- {fact}" for fact in evidence)
-    data = llm.complete_json(
-        prompt=f"ENTITY: {entity}\nPREDICATE: {predicate}\nFACTS:\n{facts}",
-        system=COVERAGE_SYSTEM,
-        model=model,
-    )
+    try:
+        data = llm.complete_json(
+            prompt=f"ENTITY: {entity}\nPREDICATE: {predicate}\nFACTS:\n{facts}",
+            system=COVERAGE_SYSTEM,
+            model=model,
+        )
+    except ValueError:  # JSONDecodeError on empty/prose reply; timeouts and budget errors still propagate
+        return True
     return data.get("covered") is not False if isinstance(data, dict) else True
 
 
